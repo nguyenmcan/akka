@@ -30,8 +30,7 @@ import akka.stream.impl.ReactiveStreamsCompliance
  * than using a BoundaryStage.
  */
 private[akka] abstract class BoundaryStage extends AbstractStage[Any, Any, Directive, Directive, BoundaryContext] {
-  private[fusing] var bctx: BoundaryContext = _
-  def enter(): BoundaryContext = bctx
+  def enter(): BoundaryContext = context
 
   final override def decide(t: Throwable): Supervision.Directive = Supervision.Stop
 
@@ -144,7 +143,11 @@ private[akka] object OneBoundedInterpreter {
  * testing and finding callstack wasting bugs), in the other case the forked call is scheduled via a list -- i.e. instead
  * of the stack the heap is used.
  */
-private[akka] class OneBoundedInterpreter(ops: Seq[Stage[_, _]], val forkLimit: Int = 100, val overflowToHeap: Boolean = true) {
+private[akka] class OneBoundedInterpreter(ops: Seq[Stage[_, _]],
+                                          onAsyncInput: (AsyncContext[Any, Any], Any) ⇒ Unit,
+                                          val forkLimit: Int = 100,
+                                          val overflowToHeap: Boolean = true,
+                                          val name: String = "") {
   import OneBoundedInterpreter._
   type UntypedOp = AbstractStage[Any, Any, Directive, Directive, Context[Any]]
   require(ops.nonEmpty, "OneBoundedInterpreter cannot be created without at least one Op")
@@ -169,6 +172,8 @@ private[akka] class OneBoundedInterpreter(ops: Seq[Stage[_, _]], val forkLimit: 
   private var elementInFlight: Any = _
   // Points to the current point of execution inside the pipeline
   private var activeOpIndex = -1
+  // Points to the last point of exit
+  private var lastExitedIndex = Downstream
   // The current interpreter state that decides what happens at the next round
   private var state: State = _
 
@@ -189,12 +194,12 @@ private[akka] class OneBoundedInterpreter(ops: Seq[Stage[_, _]], val forkLimit: 
       case _: PushPullStage[_, _] ⇒ "pushpull"
       case _: DetachedStage[_, _] ⇒ "detached"
       case _                      ⇒ "other"
-    }) + s"(${o.allowedToPush},${o.holding},${o.terminationPending})"
+    }) + s"(${o.holdingUpstream},${o.holdingDownstream},${o.terminationPending})"
   }
   override def toString =
-    s"""|OneBoundedInterpreter
+    s"""|OneBoundedInterpreter($name)
         |  pipeline = ${pipeline map pipeName mkString ":"}
-        |  activeOp=$activeOpIndex state=$state elem=$elementInFlight forks=$forkCount""".stripMargin
+        |  lastExit=$lastExitedIndex activeOp=$activeOpIndex state=$state elem=$elementInFlight forks=$forkCount""".stripMargin
 
   @inline private def currentOp: UntypedOp = pipeline(activeOpIndex)
 
@@ -218,7 +223,7 @@ private[akka] class OneBoundedInterpreter(ops: Seq[Stage[_, _]], val forkLimit: 
     }
   }
 
-  private sealed trait State extends DetachedContext[Any] with BoundaryContext {
+  private sealed trait State extends DetachedContext[Any] with BoundaryContext with AsyncContext[Any, Any] {
     final def progress(): Unit = {
       advance()
       if (inside) run()
@@ -238,21 +243,61 @@ private[akka] class OneBoundedInterpreter(ops: Seq[Stage[_, _]], val forkLimit: 
      */
     def run(): Unit
 
+    /**
+     * This method shall return true iff this is a push-style state.
+     */
+    def comingFromUpstream: Boolean
+
+    /**
+     * This method shall return true iff this is a pull-style state.
+     */
+    def comingFromDownstream: Boolean
+
+    /**
+     * This method shall return true iff this is an async entry (“from the side”).
+     */
+    def comingFromSide: Boolean
+
     override def push(elem: Any): DownstreamDirective = {
       ReactiveStreamsCompliance.requireNonNullElement(elem)
-      if (currentOp.holding) throw new IllegalStateException("Cannot push while holding, only pushAndPull")
-      currentOp.allowedToPush = false
+      if (currentOp.isDetached) {
+        if (comingFromUpstream)
+          throw new IllegalStateException("Cannot push during onPush, only pull or pushAndPull")
+        if (comingFromSide && !currentOp.holdingDownstream)
+          throw new IllegalStateException("Cannot push during onAsyncInput unless isHoldingDownstream")
+      }
+      currentOp.precedingWasPull = false
       elementInFlight = elem
       state = Pushing
       null
     }
 
     override def pull(): UpstreamDirective = {
-      if (currentOp.holding) throw new IllegalStateException("Cannot pull while holding, only pushAndPull")
-      currentOp.allowedToPush = !currentOp.isInstanceOf[DetachedStage[_, _]]
+      if (currentOp.isDetached) {
+        if (comingFromDownstream)
+          throw new IllegalStateException("Cannot pull during onPull, only push or pushAndPull")
+        if (comingFromSide && !currentOp.holdingUpstream)
+          throw new IllegalStateException("Cannot push during onAsyncInput unless isHoldingUpstream")
+      }
+      currentOp.precedingWasPull = true
       state = Pulling
       null
     }
+
+    override def getAsyncCallback(): AsyncCallback[Any] = {
+      val current = currentOp.asInstanceOf[AsyncStage[Any, Any, Any]]
+      val context = current.context // avoid concurrent access (to avoid @volatile)
+      new AsyncCallback[Any] {
+        override def invoke(evt: Any): Unit = onAsyncInput(context, evt)
+      }
+    }
+
+    override def ignore(): AsyncDirective = {
+      if (!comingFromSide) throw new IllegalStateException("Can only ignore from onAsyncInput")
+      exit()
+    }
+
+    override def enter(evt: Any): Unit = ()
 
     override def finish(): FreeDirective = {
       fork(Completing)
@@ -264,6 +309,13 @@ private[akka] class OneBoundedInterpreter(ops: Seq[Stage[_, _]], val forkLimit: 
 
     override def pushAndFinish(elem: Any): DownstreamDirective = {
       ReactiveStreamsCompliance.requireNonNullElement(elem)
+      if (currentOp.isDetached) {
+        if (comingFromUpstream && !currentOp.holdingDownstream)
+          throw new IllegalStateException("Cannot push from onPush unless isHoldingDownstream")
+        if (comingFromSide && !currentOp.holdingDownstream)
+          throw new IllegalStateException("Cannot push from onAsyncInput unless isHoldingDownStream")
+      }
+      currentOp.precedingWasPull = false
       pipeline(activeOpIndex) = Finished.asInstanceOf[UntypedOp]
       // This MUST be an unsafeFork because the execution of PushFinish MUST strictly come before the finish execution
       // path. Other forks are not order dependent because they execute on isolated execution domains which cannot
@@ -282,18 +334,32 @@ private[akka] class OneBoundedInterpreter(ops: Seq[Stage[_, _]], val forkLimit: 
       null
     }
 
-    override def hold(): FreeDirective = {
-      if (currentOp.holding) throw new IllegalStateException("Cannot hold while already holding")
-      currentOp.holding = true
+    override def holdUpstream(): UpstreamDirective = {
+      currentOp.precedingWasPull = false
+      currentOp.holdingUpstream = true
       exit()
     }
 
-    override def isHolding: Boolean = currentOp.holding
+    override def isHoldingUpstream: Boolean = currentOp.holdingUpstream
+
+    override def holdDownstream(): DownstreamDirective = {
+      currentOp.holdingDownstream = true
+      exit()
+    }
+
+    override def isHoldingDownstream: Boolean = currentOp.holdingDownstream
 
     override def pushAndPull(elem: Any): FreeDirective = {
       ReactiveStreamsCompliance.requireNonNullElement(elem)
-      if (!currentOp.holding) throw new IllegalStateException("Cannot pushAndPull without holding first")
-      currentOp.holding = false
+      if (comingFromUpstream && !currentOp.holdingDownstream)
+        throw new IllegalStateException("Cannot pushAndPull during onPush unless isHoldingDownstream")
+      if (comingFromDownstream && !currentOp.holdingUpstream)
+        throw new IllegalStateException("Cannot pushAndPull during onPull unless isHoldingUpstream")
+      if (comingFromSide && !(currentOp.holdingUpstream && currentOp.holdingDownstream))
+        throw new IllegalStateException("Cannot pushAndPull during onAsyncInput unless isHoldingBoth")
+      currentOp.precedingWasPull = true
+      currentOp.holdingUpstream = false
+      currentOp.holdingDownstream = false
       fork(Pushing, elem)
       state = Pulling
       null
@@ -301,12 +367,14 @@ private[akka] class OneBoundedInterpreter(ops: Seq[Stage[_, _]], val forkLimit: 
 
     override def absorbTermination(): TerminationDirective = {
       updateJumpBacks(activeOpIndex)
-      currentOp.holding = false
+      currentOp.holdingUpstream = false
+      currentOp.holdingDownstream = false
       finish()
     }
 
     override def exit(): FreeDirective = {
       elementInFlight = null
+      lastExitedIndex = activeOpIndex
       activeOpIndex = -1
       null
     }
@@ -315,6 +383,10 @@ private[akka] class OneBoundedInterpreter(ops: Seq[Stage[_, _]], val forkLimit: 
   private final val Pushing: State = new State {
     override def advance(): Unit = activeOpIndex += 1
     override def run(): Unit = currentOp.onPush(elementInFlight, ctx = this)
+
+    override def comingFromUpstream = true
+    override def comingFromDownstream = false
+    override def comingFromSide = false
 
     override def toString = "Pushing"
   }
@@ -335,6 +407,10 @@ private[akka] class OneBoundedInterpreter(ops: Seq[Stage[_, _]], val forkLimit: 
       null
     }
 
+    override def comingFromUpstream = true
+    override def comingFromDownstream = false
+    override def comingFromSide = false
+
     override def toString = "PushFinish"
   }
 
@@ -346,10 +422,9 @@ private[akka] class OneBoundedInterpreter(ops: Seq[Stage[_, _]], val forkLimit: 
 
     override def run(): Unit = currentOp.onPull(ctx = this)
 
-    override def hold(): FreeDirective = {
-      currentOp.allowedToPush = true
-      super.hold()
-    }
+    override def comingFromUpstream = false
+    override def comingFromDownstream = true
+    override def comingFromSide = false
 
     override def toString = "Pulling"
   }
@@ -373,12 +448,18 @@ private[akka] class OneBoundedInterpreter(ops: Seq[Stage[_, _]], val forkLimit: 
 
     override def absorbTermination(): TerminationDirective = {
       currentOp.terminationPending = true
-      currentOp.holding = false
+      currentOp.holdingUpstream = false
       updateJumpBacks(activeOpIndex)
-      if (currentOp.allowedToPush) currentOp.onPull(ctx = Pulling)
-      else exit()
+      if (currentOp.holdingDownstream || (!currentOp.isDetached && currentOp.precedingWasPull)) {
+        currentOp.holdingDownstream = false
+        currentOp.onPull(ctx = Pulling)
+      } else exit()
       null
     }
+
+    override def comingFromUpstream = true
+    override def comingFromDownstream = false
+    override def comingFromSide = false
 
     override def toString = "Completing"
   }
@@ -400,6 +481,10 @@ private[akka] class OneBoundedInterpreter(ops: Seq[Stage[_, _]], val forkLimit: 
       null
     }
 
+    override def comingFromUpstream = false
+    override def comingFromDownstream = true
+    override def comingFromSide = false
+
     override def toString = "Cancelling"
   }
 
@@ -414,12 +499,18 @@ private[akka] class OneBoundedInterpreter(ops: Seq[Stage[_, _]], val forkLimit: 
 
     override def absorbTermination(): TerminationDirective = {
       currentOp.terminationPending = true
-      currentOp.holding = false
+      currentOp.holdingUpstream = false
       updateJumpBacks(activeOpIndex)
-      if (currentOp.allowedToPush) currentOp.onPull(ctx = Pulling)
-      else exit()
+      if (currentOp.holdingDownstream || (!currentOp.isDetached && currentOp.precedingWasPull)) {
+        currentOp.holdingDownstream = false
+        currentOp.onPull(ctx = Pulling)
+      } else exit()
       null
     }
+
+    override def comingFromUpstream = true
+    override def comingFromDownstream = false
+    override def comingFromSide = false
   }
 
   private def inside: Boolean = activeOpIndex > -1 && activeOpIndex < pipeline.length
@@ -437,7 +528,7 @@ private[akka] class OneBoundedInterpreter(ops: Seq[Stage[_, _]], val forkLimit: 
       case Failing(e) ⇒ padding + s"---X ${e.getMessage} => ${decide(e)}"
       case other      ⇒ padding + s"---? $state"
     }
-    println(icon)
+    println(f"$icon%-12s $name")
   }
 
   @tailrec private def execute(): Unit = {
@@ -475,7 +566,7 @@ private[akka] class OneBoundedInterpreter(ops: Seq[Stage[_, _]], val forkLimit: 
   }
 
   def decide(e: Throwable): Supervision.Directive =
-    if (state == Pulling || state.isHolding) Supervision.Stop
+    if (state == Pulling || state.isHoldingUpstream || state.isHoldingDownstream) Supervision.Stop
     else currentOp.decide(e)
 
   /**
@@ -513,67 +604,88 @@ private[akka] class OneBoundedInterpreter(ops: Seq[Stage[_, _]], val forkLimit: 
 
   def isFinished: Boolean = pipeline(Upstream) == Finished && pipeline(Downstream) == Finished
 
+  private class EntryState(position: Int) extends State {
+    val entryPoint = position
+
+    override def run(): Unit = ()
+    override def advance(): Unit = ()
+
+    override def enter(evt: Any): Unit = {
+      activeOpIndex = entryPoint
+      (currentOp: Any) match {
+        case a: AsyncStage[Any, Any, Any] ⇒ a.onAsyncInput(evt, this)
+        case other                        ⇒ throw new IllegalStateException("cannot enter() a non-AsyncStage")
+      }
+    }
+
+    override def comingFromUpstream = false
+    override def comingFromDownstream = false
+    override def comingFromSide = true
+
+    override def push(elem: Any): DownstreamDirective = {
+      ReactiveStreamsCompliance.requireNonNullElement(elem)
+      activeOpIndex = entryPoint
+      super.push(elem)
+      execute()
+      null
+    }
+
+    override def pull(): UpstreamDirective = {
+      activeOpIndex = entryPoint
+      super.pull()
+      execute()
+      null
+    }
+
+    override def finish(): FreeDirective = {
+      activeOpIndex = entryPoint
+      super.finish()
+      execute()
+      null
+    }
+
+    override def fail(cause: Throwable): FreeDirective = {
+      activeOpIndex = entryPoint
+      super.fail(cause)
+      execute()
+      null
+    }
+
+    override def holdUpstream(): FreeDirective = {
+      activeOpIndex = entryPoint
+      super.holdUpstream()
+      execute()
+      null
+    }
+
+    override def holdDownstream(): FreeDirective = {
+      activeOpIndex = entryPoint
+      super.holdDownstream()
+      execute()
+      null
+    }
+
+    override def pushAndPull(elem: Any): FreeDirective = {
+      ReactiveStreamsCompliance.requireNonNullElement(elem)
+      activeOpIndex = entryPoint
+      super.pushAndPull(elem)
+      execute()
+      null
+    }
+
+    override def toString = s"boundary($entryPoint)"
+  }
+
   /**
-   * This method injects a Context to each of the BoundaryStages. This will be the context returned by enter().
+   * This method injects a Context to each of the BoundaryStages and AsyncStages. This will be the context returned by enter().
    */
   private def initBoundaries(): Unit = {
     var op = 0
     while (op < pipeline.length) {
-      // FIXME try to change this to a pattern match `case boundary: BoundaryStage`
-      // but that doesn't work with current Context types
-      if (pipeline(op).isInstanceOf[BoundaryStage]) {
-        pipeline(op).asInstanceOf[BoundaryStage].bctx = new State {
-          val entryPoint = op
-
-          override def run(): Unit = ()
-          override def advance(): Unit = ()
-
-          override def push(elem: Any): DownstreamDirective = {
-            ReactiveStreamsCompliance.requireNonNullElement(elem)
-            activeOpIndex = entryPoint
-            super.push(elem)
-            execute()
-            null
-          }
-
-          override def pull(): UpstreamDirective = {
-            activeOpIndex = entryPoint
-            super.pull()
-            execute()
-            null
-          }
-
-          override def finish(): FreeDirective = {
-            activeOpIndex = entryPoint
-            super.finish()
-            execute()
-            null
-          }
-
-          override def fail(cause: Throwable): FreeDirective = {
-            activeOpIndex = entryPoint
-            super.fail(cause)
-            execute()
-            null
-          }
-
-          override def hold(): FreeDirective = {
-            activeOpIndex = entryPoint
-            super.hold()
-            execute()
-            null
-          }
-
-          override def pushAndPull(elem: Any): FreeDirective = {
-            ReactiveStreamsCompliance.requireNonNullElement(elem)
-            activeOpIndex = entryPoint
-            super.pushAndPull(elem)
-            execute()
-            null
-          }
-
-          override def toString = s"boundary($op)"
-        }
+      (pipeline(op): Any) match {
+        case b: BoundaryStage             ⇒ b.context = new EntryState(op)
+        case a: AsyncStage[Any, Any, Any] ⇒ a.context = new EntryState(op)
+        case _                            ⇒
       }
       op += 1
     }
@@ -588,7 +700,7 @@ private[akka] class OneBoundedInterpreter(ops: Seq[Stage[_, _]], val forkLimit: 
   private def runDetached(): Unit = {
     var op = pipeline.length - 1
     while (op >= 0) {
-      if (pipeline(op).isInstanceOf[DetachedStage[_, _]]) {
+      if (pipeline(op).isDetached) {
         activeOpIndex = op
         state = Pulling
         execute()

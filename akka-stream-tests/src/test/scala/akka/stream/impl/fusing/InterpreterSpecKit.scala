@@ -5,6 +5,7 @@ package akka.stream.impl.fusing
 
 import akka.stream.testkit.AkkaSpec
 import akka.stream.stage._
+import akka.testkit.TestProbe
 
 trait InterpreterSpecKit extends AkkaSpec {
 
@@ -19,13 +20,13 @@ trait InterpreterSpecKit extends AkkaSpec {
     var oneMore: Boolean = false
     var lastElem: T = _
 
-    override def onPush(elem: T, ctx: Context[T]): Directive = {
+    override def onPush(elem: T, ctx: Context[T]): SyncDirective = {
       lastElem = elem
       oneMore = true
       ctx.push(elem)
     }
 
-    override def onPull(ctx: Context[T]): Directive = {
+    override def onPull(ctx: Context[T]): SyncDirective = {
       if (oneMore) {
         oneMore = false
         ctx.push(lastElem)
@@ -36,12 +37,12 @@ trait InterpreterSpecKit extends AkkaSpec {
   private[akka] case class KeepGoing[T]() extends PushPullStage[T, T] {
     var lastElem: T = _
 
-    override def onPush(elem: T, ctx: Context[T]): Directive = {
+    override def onPush(elem: T, ctx: Context[T]): SyncDirective = {
       lastElem = elem
       ctx.push(elem)
     }
 
-    override def onPull(ctx: Context[T]): Directive = {
+    override def onPull(ctx: Context[T]): SyncDirective = {
       if (ctx.isFinishing) {
         ctx.push(lastElem)
       } else ctx.pull()
@@ -55,7 +56,10 @@ trait InterpreterSpecKit extends AkkaSpec {
 
     val upstream = new UpstreamProbe
     val downstream = new DownstreamProbe
-    val interpreter = new OneBoundedInterpreter(upstream +: ops :+ downstream, forkLimit, overflowToHeap)
+    val sidechannel = TestProbe()
+    val interpreter = new OneBoundedInterpreter(upstream +: ops :+ downstream,
+      (ctx, event) ⇒ sidechannel.ref ! ActorInterpreter.AsyncInput(ctx, event),
+      forkLimit, overflowToHeap)
     interpreter.init()
 
     def lastEvents(): Set[Any] = {

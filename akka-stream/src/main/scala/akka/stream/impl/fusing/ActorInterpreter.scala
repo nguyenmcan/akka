@@ -21,7 +21,7 @@ import akka.actor.DeadLetterSuppression
 /**
  * INTERNAL API
  */
-private[akka] class BatchingActorInputBoundary(val size: Int)
+private[akka] class BatchingActorInputBoundary(val size: Int, val name: String)
   extends BoundaryStage {
 
   require(size > 0, "buffer size cannot be zero")
@@ -60,6 +60,7 @@ private[akka] class BatchingActorInputBoundary(val size: Int)
   }
 
   private def enqueue(elem: Any): Unit = {
+    if (OneBoundedInterpreter.Debug) println(s" enqueueing $elem    for $name")
     if (!upstreamCompleted) {
       if (inputBufferElements == size) throw new IllegalStateException("Input buffer overrun")
       inputBuffer((nextInputElementCursor + inputBufferElements) & IndexMask) = elem.asInstanceOf[AnyRef]
@@ -270,6 +271,7 @@ private[akka] class ActorOutputBoundary(val actor: ActorRef,
         downstreamDemand += elements
         if (downstreamDemand < 0)
           downstreamDemand = Long.MaxValue // Long overflow, Reactive Streams Spec 3:17: effectively unbounded
+        if (OneBoundedInterpreter.Debug) println(s" demand $downstreamDemand (+$elements)  for ${actor.path}")
         tryPutBallIn()
       }
 
@@ -291,6 +293,8 @@ private[akka] class ActorOutputBoundary(val actor: ActorRef,
 private[akka] object ActorInterpreter {
   def props(settings: ActorFlowMaterializerSettings, ops: Seq[Stage[_, _]]): Props =
     Props(new ActorInterpreter(settings, ops))
+
+  case class AsyncInput(ctx: AsyncContext[Any, Any], event: Any)
 }
 
 /**
@@ -298,13 +302,19 @@ private[akka] object ActorInterpreter {
  */
 private[akka] class ActorInterpreter(val settings: ActorFlowMaterializerSettings, val ops: Seq[Stage[_, _]])
   extends Actor with ActorLogging {
+  import ActorInterpreter._
 
-  private val upstream = new BatchingActorInputBoundary(settings.initialInputBufferSize)
+  private val upstream = new BatchingActorInputBoundary(settings.initialInputBufferSize, context.self.path.toString)
   private val downstream = new ActorOutputBoundary(self, settings.debugLogging, log, settings.outputBurstLimit)
-  private val interpreter = new OneBoundedInterpreter(upstream +: ops :+ downstream)
+  private val interpreter =
+    new OneBoundedInterpreter(upstream +: ops :+ downstream,
+      (ctx, event) ⇒ self ! AsyncInput(ctx, event),
+      name = context.self.path.toString)
   interpreter.init()
 
-  def receive: Receive = upstream.subreceive.orElse[Any, Unit](downstream.subreceive)
+  def receive: Receive = upstream.subreceive.orElse[Any, Unit](downstream.subreceive).orElse[Any, Unit] {
+    case AsyncInput(ctx, event) ⇒ ctx.enter(event)
+  }
 
   override protected[akka] def aroundReceive(receive: Actor.Receive, msg: Any): Unit = {
     super.aroundReceive(receive, msg)

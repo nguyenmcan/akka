@@ -12,10 +12,10 @@ private[akka] object IteratorInterpreter {
   final case class IteratorUpstream[T](input: Iterator[T]) extends PushPullStage[T, T] {
     private var hasNext = input.hasNext
 
-    override def onPush(elem: T, ctx: Context[T]): Directive =
+    override def onPush(elem: T, ctx: Context[T]): SyncDirective =
       throw new UnsupportedOperationException("IteratorUpstream operates as a source, it cannot be pushed")
 
-    override def onPull(ctx: Context[T]): Directive = {
+    override def onPull(ctx: Context[T]): SyncDirective = {
       if (!hasNext) ctx.finish()
       else {
         val elem = input.next()
@@ -94,7 +94,8 @@ private[akka] class IteratorInterpreter[I, O](val input: Iterator[I], val ops: S
 
   private val upstream = IteratorUpstream(input)
   private val downstream = IteratorDownstream[O]()
-  private val interpreter = new OneBoundedInterpreter(upstream +: ops.asInstanceOf[Seq[Stage[_, _]]] :+ downstream)
+  private val interpreter = new OneBoundedInterpreter(upstream +: ops.asInstanceOf[Seq[Stage[_, _]]] :+ downstream,
+    (ctx, evt) ⇒ throw new UnsupportedOperationException("IteratorInterpreter is fully synchronous"))
   interpreter.init()
 
   def iterator: Iterator[O] = downstream

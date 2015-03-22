@@ -117,7 +117,7 @@ public class SourceTest extends StreamTest {
           public StageState<Integer, Integer> initial() {
             return new StageState<Integer, Integer>() {
               @Override
-              public Directive onPush(Integer element, Context<Integer> ctx) {
+              public SyncDirective onPush(Integer element, Context<Integer> ctx) {
                 sum += element;
                 count += 1;
                 if (count == 4) {

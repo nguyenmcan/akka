@@ -13,7 +13,7 @@ import akka.stream.Supervision
  * INTERNAL API
  */
 private[akka] final case class Map[In, Out](f: In ⇒ Out, decider: Supervision.Decider) extends PushStage[In, Out] {
-  override def onPush(elem: In, ctx: Context[Out]): Directive = ctx.push(f(elem))
+  override def onPush(elem: In, ctx: Context[Out]): SyncDirective = ctx.push(f(elem))
 
   override def decide(t: Throwable): Supervision.Directive = decider(t)
 }
@@ -22,7 +22,7 @@ private[akka] final case class Map[In, Out](f: In ⇒ Out, decider: Supervision.
  * INTERNAL API
  */
 private[akka] final case class Filter[T](p: T ⇒ Boolean, decider: Supervision.Decider) extends PushStage[T, T] {
-  override def onPush(elem: T, ctx: Context[T]): Directive =
+  override def onPush(elem: T, ctx: Context[T]): SyncDirective =
     if (p(elem)) ctx.push(elem)
     else ctx.pull()
 
@@ -38,7 +38,7 @@ private[akka] final object Collect {
 
 private[akka] final case class Collect[In, Out](decider: Supervision.Decider)(pf: PartialFunction[In, Out]) extends PushStage[In, Out] {
   import Collect.NotApplied
-  override def onPush(elem: In, ctx: Context[Out]): Directive =
+  override def onPush(elem: In, ctx: Context[Out]): SyncDirective =
     pf.applyOrElse(elem, NotApplied) match {
       case NotApplied             ⇒ ctx.pull()
       case result: Out @unchecked ⇒ ctx.push(result)
@@ -53,13 +53,13 @@ private[akka] final case class Collect[In, Out](decider: Supervision.Decider)(pf
 private[akka] final case class MapConcat[In, Out](f: In ⇒ immutable.Seq[Out], decider: Supervision.Decider) extends PushPullStage[In, Out] {
   private var currentIterator: Iterator[Out] = Iterator.empty
 
-  override def onPush(elem: In, ctx: Context[Out]): Directive = {
+  override def onPush(elem: In, ctx: Context[Out]): SyncDirective = {
     currentIterator = f(elem).iterator
     if (currentIterator.isEmpty) ctx.pull()
     else ctx.push(currentIterator.next())
   }
 
-  override def onPull(ctx: Context[Out]): Directive =
+  override def onPull(ctx: Context[Out]): SyncDirective =
     if (currentIterator.hasNext) ctx.push(currentIterator.next())
     else if (ctx.isFinishing) ctx.finish()
     else ctx.pull()
@@ -78,7 +78,7 @@ private[akka] final case class MapConcat[In, Out](f: In ⇒ immutable.Seq[Out], 
 private[akka] final case class Take[T](count: Long) extends PushStage[T, T] {
   private var left: Long = count
 
-  override def onPush(elem: T, ctx: Context[T]): Directive = {
+  override def onPush(elem: T, ctx: Context[T]): SyncDirective = {
     left -= 1
     if (left > 0) ctx.push(elem)
     else if (left == 0) ctx.pushAndFinish(elem)
@@ -91,7 +91,7 @@ private[akka] final case class Take[T](count: Long) extends PushStage[T, T] {
  */
 private[akka] final case class Drop[T](count: Long) extends PushStage[T, T] {
   private var left: Long = count
-  override def onPush(elem: T, ctx: Context[T]): Directive =
+  override def onPush(elem: T, ctx: Context[T]): SyncDirective =
     if (left > 0) {
       left -= 1
       ctx.pull()
@@ -104,13 +104,13 @@ private[akka] final case class Drop[T](count: Long) extends PushStage[T, T] {
 private[akka] final case class Scan[In, Out](zero: Out, f: (Out, In) ⇒ Out, decider: Supervision.Decider) extends PushPullStage[In, Out] {
   private var aggregator = zero
 
-  override def onPush(elem: In, ctx: Context[Out]): Directive = {
+  override def onPush(elem: In, ctx: Context[Out]): SyncDirective = {
     val old = aggregator
     aggregator = f(old, elem)
     ctx.push(old)
   }
 
-  override def onPull(ctx: Context[Out]): Directive =
+  override def onPull(ctx: Context[Out]): SyncDirective =
     if (ctx.isFinishing) ctx.pushAndFinish(aggregator)
     else ctx.pull()
 
@@ -127,12 +127,12 @@ private[akka] final case class Scan[In, Out](zero: Out, f: (Out, In) ⇒ Out, de
 private[akka] final case class Fold[In, Out](zero: Out, f: (Out, In) ⇒ Out, decider: Supervision.Decider) extends PushPullStage[In, Out] {
   private var aggregator = zero
 
-  override def onPush(elem: In, ctx: Context[Out]): Directive = {
+  override def onPush(elem: In, ctx: Context[Out]): SyncDirective = {
     aggregator = f(aggregator, elem)
     ctx.pull()
   }
 
-  override def onPull(ctx: Context[Out]): Directive =
+  override def onPull(ctx: Context[Out]): SyncDirective =
     if (ctx.isFinishing) ctx.pushAndFinish(aggregator)
     else ctx.pull()
 
@@ -154,7 +154,7 @@ private[akka] final case class Grouped[T](n: Int) extends PushPullStage[T, immut
   }
   private var left = n
 
-  override def onPush(elem: T, ctx: Context[immutable.Seq[T]]): Directive = {
+  override def onPush(elem: T, ctx: Context[immutable.Seq[T]]): SyncDirective = {
     buf += elem
     left -= 1
     if (left == 0) {
@@ -165,7 +165,7 @@ private[akka] final case class Grouped[T](n: Int) extends PushPullStage[T, immut
     } else ctx.pull()
   }
 
-  override def onPull(ctx: Context[immutable.Seq[T]]): Directive =
+  override def onPull(ctx: Context[immutable.Seq[T]]): SyncDirective =
     if (ctx.isFinishing) {
       val elem = buf.result()
       buf.clear() //FIXME null out the reference to the `buf`?
@@ -187,7 +187,7 @@ private[akka] final case class Buffer[T](size: Int, overflowStrategy: OverflowSt
   private val buffer = FixedSizeBuffer(size)
 
   override def onPush(elem: T, ctx: DetachedContext[T]): UpstreamDirective =
-    if (ctx.isHolding) ctx.pushAndPull(elem)
+    if (ctx.isHoldingDownstream) ctx.pushAndPull(elem)
     else enqueueAction(ctx, elem)
 
   override def onPull(ctx: DetachedContext[T]): DownstreamDirective = {
@@ -195,8 +195,8 @@ private[akka] final case class Buffer[T](size: Int, overflowStrategy: OverflowSt
       val elem = buffer.dequeue().asInstanceOf[T]
       if (buffer.isEmpty) ctx.pushAndFinish(elem)
       else ctx.push(elem)
-    } else if (ctx.isHolding) ctx.pushAndPull(buffer.dequeue().asInstanceOf[T])
-    else if (buffer.isEmpty) ctx.hold()
+    } else if (ctx.isHoldingUpstream) ctx.pushAndPull(buffer.dequeue().asInstanceOf[T])
+    else if (buffer.isEmpty) ctx.holdDownstream()
     else ctx.push(buffer.dequeue().asInstanceOf[T])
   }
 
@@ -223,7 +223,7 @@ private[akka] final case class Buffer[T](size: Int, overflowStrategy: OverflowSt
       }
       case Backpressure ⇒ { (ctx, elem) ⇒
         buffer.enqueue(elem)
-        if (buffer.isFull) ctx.hold()
+        if (buffer.isFull) ctx.holdUpstream()
         else ctx.pull()
       }
       case Fail ⇒ { (ctx, elem) ⇒
@@ -241,8 +241,8 @@ private[akka] final case class Buffer[T](size: Int, overflowStrategy: OverflowSt
  * INTERNAL API
  */
 private[akka] final case class Completed[T]() extends PushPullStage[T, T] {
-  override def onPush(elem: T, ctx: Context[T]): Directive = ctx.finish()
-  override def onPull(ctx: Context[T]): Directive = ctx.finish()
+  override def onPush(elem: T, ctx: Context[T]): SyncDirective = ctx.finish()
+  override def onPull(ctx: Context[T]): SyncDirective = ctx.finish()
 }
 
 /**
@@ -257,7 +257,7 @@ private[akka] final case class Conflate[In, Out](seed: In ⇒ Out, aggregate: (O
       if (agg == null) seed(elem)
       else aggregate(agg.asInstanceOf[Out], elem)
 
-    if (!ctx.isHolding) ctx.pull()
+    if (!ctx.isHoldingDownstream) ctx.pull()
     else {
       val result = agg.asInstanceOf[Out]
       agg = null
@@ -273,7 +273,7 @@ private[akka] final case class Conflate[In, Out](seed: In ⇒ Out, aggregate: (O
         agg = null
         ctx.pushAndFinish(result)
       }
-    } else if (agg == null) ctx.hold()
+    } else if (agg == null) ctx.holdDownstream()
     else {
       val result = agg.asInstanceOf[Out]
       if (result == null) throw new NullPointerException
@@ -301,24 +301,24 @@ private[akka] final case class Expand[In, Out, Seed](seed: In ⇒ Seed, extrapol
     s = seed(elem)
     started = true
     expanded = false
-    if (ctx.isHolding) {
+    if (ctx.isHoldingDownstream) {
       val (emit, newS) = extrapolate(s)
       s = newS
       expanded = true
       ctx.pushAndPull(emit)
-    } else ctx.hold()
+    } else ctx.holdUpstream()
   }
 
   override def onPull(ctx: DetachedContext[Out]): DownstreamDirective = {
     if (ctx.isFinishing) {
       if (!started) ctx.finish()
       else ctx.pushAndFinish(extrapolate(s)._1)
-    } else if (!started) ctx.hold()
+    } else if (!started) ctx.holdDownstream()
     else {
       val (emit, newS) = extrapolate(s)
       s = newS
       expanded = true
-      if (ctx.isHolding) ctx.pushAndPull(emit)
+      if (ctx.isHoldingUpstream) ctx.pushAndPull(emit)
       else ctx.push(emit)
     }
 

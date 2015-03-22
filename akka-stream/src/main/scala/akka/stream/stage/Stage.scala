@@ -28,9 +28,30 @@ import akka.stream.Supervision
 sealed trait Stage[-In, Out]
 
 private[stream] abstract class AbstractStage[-In, Out, PushD <: Directive, PullD <: Directive, Ctx <: Context[Out]] extends Stage[In, Out] {
-  private[stream] var holding = false
-  private[stream] var allowedToPush = false
+  /**
+   * INTERNAL API
+   */
+  private[stream] var holdingUpstream = false
+  /**
+   * INTERNAL API
+   */
+  private[stream] var holdingDownstream = false
+  /**
+   * INTERNAL API
+   */
+  private[stream] var precedingWasPull = false
+  /**
+   * INTERNAL API
+   */
   private[stream] var terminationPending = false
+  /**
+   * INTERNAL API
+   */
+  private[stream] var context: Ctx = _
+  /**
+   * INTERNAL API
+   */
+  private[stream] def isDetached: Boolean = false
 
   /**
    * `onPush` is called when an element from upstream is available and there is demand from downstream, i.e.
@@ -154,7 +175,7 @@ private[stream] abstract class AbstractStage[-In, Out, PushD <: Directive, PullD
  * @see [[StatefulStage]]
  * @see [[PushStage]]
  */
-abstract class PushPullStage[In, Out] extends AbstractStage[In, Out, Directive, Directive, Context[Out]]
+abstract class PushPullStage[In, Out] extends AbstractStage[In, Out, SyncDirective, SyncDirective, Context[Out]]
 
 /**
  * `PushStage` is a [[PushPullStage]] that always perform transitive pull by calling `ctx.pull` from `onPull`.
@@ -163,7 +184,7 @@ abstract class PushStage[In, Out] extends PushPullStage[In, Out] {
   /**
    * Always pulls from upstream.
    */
-  final override def onPull(ctx: Context[Out]): Directive = ctx.pull()
+  final override def onPull(ctx: Context[Out]): SyncDirective = ctx.pull()
 }
 
 /**
@@ -188,7 +209,9 @@ abstract class PushStage[In, Out] extends PushPullStage[In, Out] {
  *
  * @see [[PushPullStage]]
  */
-abstract class DetachedStage[In, Out] extends AbstractStage[In, Out, UpstreamDirective, DownstreamDirective, DetachedContext[Out]] {
+abstract class DetachedStage[In, Out]
+  extends AbstractStage[In, Out, UpstreamDirective, DownstreamDirective, DetachedContext[Out]] {
+  private[stream] override def isDetached = true
 
   /**
    * If an exception is thrown from [[#onPush]] this method is invoked to decide how
@@ -204,12 +227,32 @@ abstract class DetachedStage[In, Out] extends AbstractStage[In, Out, UpstreamDir
 }
 
 /**
+ * This is a variant of [[DetachedStage]] that can receive asynchronous input
+ * from external sources, for example timers or Future results. In order to
+ * do this, obtain an [[AsyncCallback]] from the [[AsyncContext]] and attach
+ * it to the asynchronous event. When the event fires an asynchronous notification
+ * will be dispatched that eventually will lead to `onAsyncInput` being invoked
+ * with the provided data item.
+ */
+abstract class AsyncStage[In, Out, Ext]
+  extends AbstractStage[In, Out, UpstreamDirective, DownstreamDirective, AsyncContext[Out, Ext]] {
+  private[stream] override def isDetached = true
+
+  /**
+   * Implement this method to define the action to be taken in response to an
+   * asynchronous notification that was previously registered using
+   * [[AsyncContext#getAsyncCallback]].
+   */
+  def onAsyncInput(event: Ext, ctx: AsyncContext[Out, Ext]): Directive
+}
+
+/**
  * The behavior of [[StatefulStage]] is defined by these two methods, which
  * has the same sematics as corresponding methods in [[PushPullStage]].
  */
 abstract class StageState[In, Out] {
-  def onPush(elem: In, ctx: Context[Out]): Directive
-  def onPull(ctx: Context[Out]): Directive = ctx.pull()
+  def onPush(elem: In, ctx: Context[Out]): SyncDirective
+  def onPull(ctx: Context[Out]): SyncDirective = ctx.pull()
 }
 
 /**
@@ -268,11 +311,11 @@ abstract class StatefulStage[In, Out] extends PushPullStage[In, Out] {
   /**
    * Invokes current state.
    */
-  final override def onPush(elem: In, ctx: Context[Out]): Directive = _current.onPush(elem, ctx)
+  final override def onPush(elem: In, ctx: Context[Out]): SyncDirective = _current.onPush(elem, ctx)
   /**
    * Invokes current state.
    */
-  final override def onPull(ctx: Context[Out]): Directive = _current.onPull(ctx)
+  final override def onPull(ctx: Context[Out]): SyncDirective = _current.onPull(ctx)
 
   override def onUpstreamFinish(ctx: Context[Out]): TerminationDirective =
     if (emitting) ctx.absorbTermination()
@@ -282,13 +325,13 @@ abstract class StatefulStage[In, Out] extends PushPullStage[In, Out] {
    * Scala API: Can be used from [[StageState#onPush]] or [[StageState#onPull]] to push more than one
    * element downstreams.
    */
-  final def emit(iter: Iterator[Out], ctx: Context[Out]): Directive = emit(iter, ctx, _current)
+  final def emit(iter: Iterator[Out], ctx: Context[Out]): SyncDirective = emit(iter, ctx, _current)
 
   /**
    * Java API: Can be used from [[StageState#onPush]] or [[StageState#onPull]] to push more than one
    * element downstreams.
    */
-  final def emit(iter: java.util.Iterator[Out], ctx: Context[Out]): Directive = {
+  final def emit(iter: java.util.Iterator[Out], ctx: Context[Out]): SyncDirective = {
     import scala.collection.JavaConverters._
     emit(iter.asScala, ctx)
   }
@@ -297,7 +340,7 @@ abstract class StatefulStage[In, Out] extends PushPullStage[In, Out] {
    * Scala API: Can be used from [[StageState#onPush]] or [[StageState#onPull]] to push more than one
    * element downstreams and after that change behavior.
    */
-  final def emit(iter: Iterator[Out], ctx: Context[Out], nextState: StageState[In, Out]): Directive = {
+  final def emit(iter: Iterator[Out], ctx: Context[Out], nextState: StageState[In, Out]): SyncDirective = {
     if (emitting) throw new IllegalStateException("already in emitting state")
     if (iter.isEmpty) {
       become(nextState)
@@ -317,7 +360,7 @@ abstract class StatefulStage[In, Out] extends PushPullStage[In, Out] {
    * Java API: Can be used from [[StageState#onPush]] or [[StageState#onPull]] to push more than one
    * element downstreams and after that change behavior.
    */
-  final def emit(iter: java.util.Iterator[Out], ctx: Context[Out], nextState: StageState[In, Out]): Directive = {
+  final def emit(iter: java.util.Iterator[Out], ctx: Context[Out], nextState: StageState[In, Out]): SyncDirective = {
     import scala.collection.JavaConverters._
     emit(iter.asScala, ctx, nextState)
   }
@@ -326,7 +369,7 @@ abstract class StatefulStage[In, Out] extends PushPullStage[In, Out] {
    * Scala API: Can be used from [[StageState#onPush]] or [[StageState#onPull]] to push more than one
    * element downstreams and after that finish (complete downstreams, cancel upstreams).
    */
-  final def emitAndFinish(iter: Iterator[Out], ctx: Context[Out]): Directive = {
+  final def emitAndFinish(iter: Iterator[Out], ctx: Context[Out]): SyncDirective = {
     if (emitting) throw new IllegalStateException("already in emitting state")
     if (iter.isEmpty)
       ctx.finish()
@@ -345,7 +388,7 @@ abstract class StatefulStage[In, Out] extends PushPullStage[In, Out] {
    * Java API: Can be used from [[StageState#onPush]] or [[StageState#onPull]] to push more than one
    * element downstreams and after that finish (complete downstreams, cancel upstreams).
    */
-  final def emitAndFinish(iter: java.util.Iterator[Out], ctx: Context[Out]): Directive = {
+  final def emitAndFinish(iter: java.util.Iterator[Out], ctx: Context[Out]): SyncDirective = {
     import scala.collection.JavaConverters._
     emitAndFinish(iter.asScala, ctx)
   }
@@ -403,11 +446,13 @@ abstract class StatefulStage[In, Out] extends PushPullStage[In, Out] {
  * Return type from [[Context]] methods.
  */
 sealed trait Directive
-sealed trait UpstreamDirective extends Directive
-sealed trait DownstreamDirective extends Directive
-sealed trait TerminationDirective extends Directive
+sealed trait AsyncDirective extends Directive
+sealed trait SyncDirective extends Directive
+sealed trait UpstreamDirective extends SyncDirective
+sealed trait DownstreamDirective extends SyncDirective
+sealed trait TerminationDirective extends SyncDirective
 // never instantiated
-sealed abstract class FreeDirective private () extends UpstreamDirective with DownstreamDirective with TerminationDirective
+sealed abstract class FreeDirective private () extends UpstreamDirective with DownstreamDirective with TerminationDirective with AsyncDirective
 
 /**
  * Passed to the callback methods of [[PushPullStage]] and [[StatefulStage]].
@@ -455,16 +500,58 @@ sealed trait Context[Out] {
  * events making the balance right again: 1 hold + 1 external event = 2 external event
  */
 trait DetachedContext[Out] extends Context[Out] {
-  def hold(): FreeDirective
+  def holdUpstream(): UpstreamDirective
+  def holdDownstream(): DownstreamDirective
 
   /**
    * This returns `true` when [[#hold]] has been used
    * and it is reset to `false` after [[#pushAndPull]].
    */
-  def isHolding: Boolean
+  def isHoldingBoth: Boolean = isHoldingUpstream && isHoldingDownstream
+  def isHoldingUpstream: Boolean
+  def isHoldingDownstream: Boolean
 
   def pushAndPull(elem: Out): FreeDirective
 
+}
+
+/**
+ * An asynchronous callback holder that is attached to an [[AsyncContext]].
+ * Invoking [[AsyncCallback#invoke]] will eventually lead to [[AsyncStage#onAsyncInput]]
+ * being called.
+ */
+trait AsyncCallback[T] {
+  /**
+   * Dispatch an asynchronous notification. This method is thread-safe and
+   * may be invoked from external execution contexts.
+   */
+  def invoke(t: T): Unit
+}
+
+/**
+ * This kind of context is available to [[AsyncStage]]. It implements the same
+ * interface as for [[DetachedStage]] with the addition of being able to obtain
+ * [[AsyncCallback]] objects that allow the registration of asynchronous
+ * notifications.
+ */
+trait AsyncContext[Out, Ext] extends DetachedContext[Out] {
+  /**
+   * INTERNAL API.
+   */
+  private[stream] def enter(event: Ext): Unit
+  /**
+   * Obtain a callback object that can be used asynchronously to re-enter the
+   * current [[AsyncStage]] with an asynchronous notification. After the
+   * notification has been invoked, eventually [[AsyncStage#onAsyncInput]]
+   * will be called with the given data item.
+   */
+  def getAsyncCallback(): AsyncCallback[Ext]
+  /**
+   * In response to an asynchronous notification an [[AsyncStage]] may choose
+   * to neither push nor pull nor terminate, which is represented as this
+   * directive.
+   */
+  def ignore(): AsyncDirective
 }
 
 /**

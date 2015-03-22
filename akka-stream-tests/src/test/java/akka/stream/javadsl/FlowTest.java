@@ -102,7 +102,7 @@ public class FlowTest extends StreamTest {
           public StageState<Integer, Integer> initial() {
             return new StageState<Integer, Integer>() {
               @Override
-              public Directive onPush(Integer element, Context<Integer> ctx) {
+              public SyncDirective onPush(Integer element, Context<Integer> ctx) {
                 sum += element;
                 count += 1;
                 if (count == 4) {
@@ -226,12 +226,12 @@ public class FlowTest extends StreamTest {
       public PushPullStage<T, T> create() throws Exception {
         return new PushPullStage<T, T>() {  
           @Override
-          public Directive onPush(T element, Context<T> ctx) {
+          public SyncDirective onPush(T element, Context<T> ctx) {
             return ctx.push(element);
           }
           
           @Override
-          public Directive onPull(Context<T> ctx) {
+          public SyncDirective onPull(Context<T> ctx) {
             return ctx.pull();
           }
         };
