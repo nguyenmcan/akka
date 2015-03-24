@@ -4,10 +4,14 @@
 package akka.stream.impl.fusing
 
 import scala.collection.immutable
-import akka.stream.OverflowStrategy
 import akka.stream.impl.FixedSizeBuffer
 import akka.stream.stage._
-import akka.stream.Supervision
+import akka.stream._
+import org.reactivestreams.Subscriber
+import org.reactivestreams.Subscription
+import akka.stream.scaladsl.Source
+import akka.stream.scaladsl.Sink
+import akka.stream.impl.FixedSizeBuffer.PowerOfTwoFixedSizeBuffer
 
 /**
  * INTERNAL API
@@ -184,7 +188,7 @@ private[akka] final case class Grouped[T](n: Int) extends PushPullStage[T, immut
 private[akka] final case class Buffer[T](size: Int, overflowStrategy: OverflowStrategy) extends DetachedStage[T, T] {
   import OverflowStrategy._
 
-  private val buffer = FixedSizeBuffer(size)
+  private val buffer = FixedSizeBuffer[T](size)
 
   override def onPush(elem: T, ctx: DetachedContext[T]): UpstreamDirective =
     if (ctx.isHoldingDownstream) ctx.pushAndPull(elem)
@@ -333,4 +337,85 @@ private[akka] final case class Expand[In, Out, Seed](seed: In ⇒ Seed, extrapol
 
   final override def restart(): Expand[In, Out, Seed] =
     throw new UnsupportedOperationException("Expand doesn't support restart")
+}
+
+object MergeAll {
+  sealed trait Msg[T]
+  case class OnSubscribe[T](sub: Sub[T], subscription: Subscription) extends Msg[T]
+  case class OnNext[T](sub: Sub[T], elem: T) extends Msg[T]
+  case class OnError[T](sub: Sub[T], cause: Throwable) extends Msg[T]
+  case class OnComplete[T](sub: Sub[T]) extends Msg[T]
+
+  class Sub[T](cb: AsyncCallback[Msg[T]], bufferSize: Int) extends Subscriber[T] {
+    private val lowWatermark = (bufferSize + 1) >> 1
+    private var subscription: Subscription = _
+    private var outstanding = 0
+    private val buffer = FixedSizeBuffer[T](bufferSize)
+
+    private def request(): Unit =
+      if (outstanding < lowWatermark) {
+        subscription.request(bufferSize - outstanding)
+        outstanding = bufferSize
+      }
+
+    def setSubscription(subscription: Subscription): Unit = {
+      this.subscription = subscription
+      request()
+    }
+
+    def enqueue(elem: T): Unit = buffer.enqueue(elem)
+    def dequeue(): T = {
+      outstanding -= 1
+      request()
+      buffer.dequeue()
+    }
+    def enqueueDequeue(): Unit = {
+      outstanding -= 1
+      request()
+    }
+
+    override def onSubscribe(subscription: Subscription): Unit = cb.invoke(OnSubscribe(this, subscription))
+    override def onNext(elem: T): Unit = cb.invoke(OnNext(this, elem))
+    override def onError(cause: Throwable): Unit = cb.invoke(OnError(this, cause))
+    override def onComplete(): Unit = cb.invoke(OnComplete(this))
+  }
+}
+
+case class MergeAll[T, M](width: Int, bufferSize: Int) extends AsyncStage[Graph[SourceShape[T], M], T, MergeAll.Msg[T]] {
+  import MergeAll._
+
+  private var subs = Set.empty[Sub[T]]
+
+  override def onPush(elem: Graph[SourceShape[T], M], ctx: AsyncContext[T, Msg[T]]) = {
+    val sub = new Sub(ctx.getAsyncCallback(), bufferSize)
+    Source.wrap(elem).to(Sink(sub)).run()(ctx.materializer)
+    subs += sub
+    if (subs.size == width) ctx.holdUpstream()
+    else ctx.pull()
+  }
+
+  override def onPull(ctx: AsyncContext[T, Msg[T]]) =
+    dequeue() match {
+      case null => ctx.holdDownstream()
+      case elem => ctx.push(elem)
+    }
+
+  override def onAsyncInput(msg: Msg[T], ctx: AsyncContext[T, Msg[T]]) =
+    // FIXME RS compliance
+    msg match {
+      case OnSubscribe(sub, subscription) =>
+        sub.setSubscription(subscription)
+        ctx.ignore()
+      case OnNext(sub, elem) =>
+        if (ctx.isHoldingDownstream) {
+          sub.enqueueDequeue()
+          ctx.push(elem)
+        } else {
+          sub.enqueue(elem)
+          ctx.ignore()
+        }
+      case OnError(sub, cause) =>
+    }
+
+  private def dequeue(): T = ???
 }

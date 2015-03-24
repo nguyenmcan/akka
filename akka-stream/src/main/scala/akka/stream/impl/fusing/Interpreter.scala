@@ -9,6 +9,7 @@ import scala.util.control.NonFatal
 import akka.stream.stage._
 import akka.stream.Supervision
 import akka.stream.impl.ReactiveStreamsCompliance
+import akka.stream.FlowMaterializer
 
 // TODO:
 // fix jumpback table with keep-going-on-complete ops (we might jump between otherwise isolated execution regions)
@@ -145,6 +146,7 @@ private[akka] object OneBoundedInterpreter {
  */
 private[akka] class OneBoundedInterpreter(ops: Seq[Stage[_, _]],
                                           onAsyncInput: (AsyncContext[Any, Any], Any) ⇒ Unit,
+                                          materializer: FlowMaterializer,
                                           val forkLimit: Int = 100,
                                           val overflowToHeap: Boolean = true,
                                           val name: String = "") {
@@ -378,6 +380,8 @@ private[akka] class OneBoundedInterpreter(ops: Seq[Stage[_, _]],
       activeOpIndex = -1
       null
     }
+
+    override def materializer: FlowMaterializer = OneBoundedInterpreter.this.materializer
   }
 
   private final val Pushing: State = new State {

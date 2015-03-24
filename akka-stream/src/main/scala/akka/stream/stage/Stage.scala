@@ -4,6 +4,7 @@
 package akka.stream.stage
 
 import akka.stream.Supervision
+import akka.stream.FlowMaterializer
 
 /**
  * General interface for stream transformation.
@@ -489,6 +490,12 @@ sealed trait Context[Out] {
    * This returns `true` after [[#absorbTermination]] has been used.
    */
   def isFinishing: Boolean
+
+  /**
+   * Returns the FlowMaterializer that was used to materialize this [[Stage]].
+   * It can be used to materialize sub-flows.
+   */
+  def materializer: FlowMaterializer
 }
 
 /**

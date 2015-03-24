@@ -17,6 +17,7 @@ import akka.actor.Props
 import akka.actor.ActorLogging
 import akka.event.LoggingAdapter
 import akka.actor.DeadLetterSuppression
+import akka.stream.ActorFlowMaterializer
 
 /**
  * INTERNAL API
@@ -291,8 +292,8 @@ private[akka] class ActorOutputBoundary(val actor: ActorRef,
  * INTERNAL API
  */
 private[akka] object ActorInterpreter {
-  def props(settings: ActorFlowMaterializerSettings, ops: Seq[Stage[_, _]]): Props =
-    Props(new ActorInterpreter(settings, ops))
+  def props(settings: ActorFlowMaterializerSettings, ops: Seq[Stage[_, _]], materializer: ActorFlowMaterializer): Props =
+    Props(new ActorInterpreter(settings, ops, materializer))
 
   case class AsyncInput(ctx: AsyncContext[Any, Any], event: Any)
 }
@@ -300,7 +301,7 @@ private[akka] object ActorInterpreter {
 /**
  * INTERNAL API
  */
-private[akka] class ActorInterpreter(val settings: ActorFlowMaterializerSettings, val ops: Seq[Stage[_, _]])
+private[akka] class ActorInterpreter(val settings: ActorFlowMaterializerSettings, val ops: Seq[Stage[_, _]], val materializer: ActorFlowMaterializer)
   extends Actor with ActorLogging {
   import ActorInterpreter._
 
@@ -309,6 +310,7 @@ private[akka] class ActorInterpreter(val settings: ActorFlowMaterializerSettings
   private val interpreter =
     new OneBoundedInterpreter(upstream +: ops :+ downstream,
       (ctx, event) ⇒ self ! AsyncInput(ctx, event),
+      materializer,
       name = context.self.path.toString)
   interpreter.init()
 

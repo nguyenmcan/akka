@@ -6,6 +6,7 @@ package akka.stream.impl.fusing
 import akka.stream.testkit.AkkaSpec
 import akka.stream.stage._
 import akka.testkit.TestProbe
+import akka.stream.ActorFlowMaterializer
 
 trait InterpreterSpecKit extends AkkaSpec {
 
@@ -59,6 +60,7 @@ trait InterpreterSpecKit extends AkkaSpec {
     val sidechannel = TestProbe()
     val interpreter = new OneBoundedInterpreter(upstream +: ops :+ downstream,
       (ctx, event) ⇒ sidechannel.ref ! ActorInterpreter.AsyncInput(ctx, event),
+      ActorFlowMaterializer(),
       forkLimit, overflowToHeap)
     interpreter.init()
 
