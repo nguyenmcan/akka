@@ -240,6 +240,13 @@ abstract class AsyncStage[In, Out, Ext]
   private[stream] override def isDetached = true
 
   /**
+   * Initial input for the asynchronous “side” of this Stage. This can be overridden
+   * to set initial asynchronous requests in motion or schedule asynchronous
+   * events.
+   */
+  def initAsyncInput(ctx: AsyncContext[Out, Ext]): Unit = ()
+
+  /**
    * Implement this method to define the action to be taken in response to an
    * asynchronous notification that was previously registered using
    * [[AsyncContext#getAsyncCallback]].

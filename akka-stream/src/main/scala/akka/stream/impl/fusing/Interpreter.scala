@@ -687,9 +687,12 @@ private[akka] class OneBoundedInterpreter(ops: Seq[Stage[_, _]],
     var op = 0
     while (op < pipeline.length) {
       (pipeline(op): Any) match {
-        case b: BoundaryStage             ⇒ b.context = new EntryState(op)
-        case a: AsyncStage[Any, Any, Any] ⇒ a.context = new EntryState(op)
-        case _                            ⇒
+        case b: BoundaryStage ⇒
+          b.context = new EntryState(op)
+        case a: AsyncStage[Any, Any, Any] ⇒
+          a.context = new EntryState(op)
+          a.initAsyncInput(a.context)
+        case _ ⇒
       }
       op += 1
     }

@@ -7,11 +7,9 @@ import scala.collection.immutable
 import akka.stream.impl.FixedSizeBuffer
 import akka.stream.stage._
 import akka.stream._
-import org.reactivestreams.Subscriber
-import org.reactivestreams.Subscription
-import akka.stream.scaladsl.Source
-import akka.stream.scaladsl.Sink
-import akka.stream.impl.FixedSizeBuffer.PowerOfTwoFixedSizeBuffer
+import akka.stream.Supervision
+import scala.concurrent.{ ExecutionContext, Future }
+import scala.util.{ Try, Success, Failure }
 
 /**
  * INTERNAL API
@@ -339,83 +337,48 @@ private[akka] final case class Expand[In, Out, Seed](seed: In ⇒ Seed, extrapol
     throw new UnsupportedOperationException("Expand doesn't support restart")
 }
 
-object MergeAll {
-  sealed trait Msg[T]
-  case class OnSubscribe[T](sub: Sub[T], subscription: Subscription) extends Msg[T]
-  case class OnNext[T](sub: Sub[T], elem: T) extends Msg[T]
-  case class OnError[T](sub: Sub[T], cause: Throwable) extends Msg[T]
-  case class OnComplete[T](sub: Sub[T]) extends Msg[T]
+/**
+ * INTERNAL API
+ */
+private[akka] final case class MapAsync[In, Out](f: In ⇒ Future[Out]) extends AsyncStage[In, Out, (Int, Try[Out])] {
+  private var doneSeqNo = 0
+  private val seqNo = Iterator from 0
 
-  class Sub[T](cb: AsyncCallback[Msg[T]], bufferSize: Int) extends Subscriber[T] {
-    private val lowWatermark = (bufferSize + 1) >> 1
-    private var subscription: Subscription = _
-    private var outstanding = 0
-    private val buffer = FixedSizeBuffer[T](bufferSize)
+  private var decider: Supervision.Decider = _
 
-    private def request(): Unit =
-      if (outstanding < lowWatermark) {
-        subscription.request(bufferSize - outstanding)
-        outstanding = bufferSize
-      }
-
-    def setSubscription(subscription: Subscription): Unit = {
-      this.subscription = subscription
-      request()
-    }
-
-    def enqueue(elem: T): Unit = buffer.enqueue(elem)
-    def dequeue(): T = {
-      outstanding -= 1
-      request()
-      buffer.dequeue()
-    }
-    def enqueueDequeue(): Unit = {
-      outstanding -= 1
-      request()
-    }
-
-    override def onSubscribe(subscription: Subscription): Unit = cb.invoke(OnSubscribe(this, subscription))
-    override def onNext(elem: T): Unit = cb.invoke(OnNext(this, elem))
-    override def onError(cause: Throwable): Unit = cb.invoke(OnError(this, cause))
-    override def onComplete(): Unit = cb.invoke(OnComplete(this))
-  }
-}
-
-case class MergeAll[T, M](width: Int, bufferSize: Int) extends AsyncStage[Graph[SourceShape[T], M], T, MergeAll.Msg[T]] {
-  import MergeAll._
-
-  private var subs = Set.empty[Sub[T]]
-
-  override def onPush(elem: Graph[SourceShape[T], M], ctx: AsyncContext[T, Msg[T]]) = {
-    val sub = new Sub(ctx.getAsyncCallback(), bufferSize)
-    Source.wrap(elem).to(Sink(sub)).run()(ctx.materializer)
-    subs += sub
-    if (subs.size == width) ctx.holdUpstream()
-    else ctx.pull()
+  override def initAsyncInput(ctx: AsyncContext[Out, (Int, Try[Out])]): Unit = {
   }
 
-  override def onPull(ctx: AsyncContext[T, Msg[T]]) =
-    dequeue() match {
-      case null => ctx.holdDownstream()
-      case elem => ctx.push(elem)
-    }
+  private var elemInFlight: Out = _
 
-  override def onAsyncInput(msg: Msg[T], ctx: AsyncContext[T, Msg[T]]) =
-    // FIXME RS compliance
-    msg match {
-      case OnSubscribe(sub, subscription) =>
-        sub.setSubscription(subscription)
+  override def onPush(elem: In, ctx: AsyncContext[Out, (Int, Try[Out])]) = {
+    val future = f(elem)
+    val cb = ctx.getAsyncCallback()
+    future.onComplete(t => cb.invoke((0, t)))(akka.dispatch.ExecutionContexts.sameThreadExecutionContext)
+    ctx.holdUpstream()
+  }
+
+  override def onPull(ctx: AsyncContext[Out, (Int, Try[Out])]) =
+    if (elemInFlight != null) {
+      val e = elemInFlight
+      elemInFlight = null.asInstanceOf[Out]
+      pushIt(e, ctx)
+    } else ctx.holdDownstream()
+
+  override def onAsyncInput(input: (Int, Try[Out]), ctx: AsyncContext[Out, (Int, Try[Out])]) =
+    input._2 match {
+      case Failure(ex)                           ⇒ ctx.fail(ex)
+      case Success(e) if ctx.isHoldingDownstream ⇒ pushIt(e, ctx)
+      case Success(e) ⇒
+        elemInFlight = e
         ctx.ignore()
-      case OnNext(sub, elem) =>
-        if (ctx.isHoldingDownstream) {
-          sub.enqueueDequeue()
-          ctx.push(elem)
-        } else {
-          sub.enqueue(elem)
-          ctx.ignore()
-        }
-      case OnError(sub, cause) =>
     }
 
-  private def dequeue(): T = ???
+  override def onUpstreamFinish(ctx: AsyncContext[Out, (Int, Try[Out])]) =
+    if (ctx.isHoldingUpstream) ctx.absorbTermination()
+    else ctx.finish()
+
+  private def pushIt(elem: Out, ctx: AsyncContext[Out, (Int, Try[Out])]) =
+    if (ctx.isFinishing) ctx.pushAndFinish(elem)
+    else ctx.pushAndPull(elem)
 }
