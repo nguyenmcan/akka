@@ -21,6 +21,7 @@ import scala.util.Try
 import scala.concurrent.ExecutionContext
 import scala.util.Failure
 import scala.util.Success
+import org.scalactic.ConversionCheckedTripleEquals
 
 object FlowMapAsyncSpec {
   class MapAsyncOne[In, Out](f: In ⇒ Future[Out])(implicit ec: ExecutionContext) extends AsyncStage[In, Out, Try[Out]] {
@@ -93,7 +94,7 @@ class FlowMapAsyncSpec extends AkkaSpec {
       c.expectComplete()
     }
 
-    "not run more futures than requested elements" in {
+    "not run more futures than requested parallelism" in {
       val probe = TestProbe()
       val c = StreamTestKit.SubscriberProbe[Int]()
       implicit val ec = system.dispatcher
@@ -102,16 +103,17 @@ class FlowMapAsyncSpec extends AkkaSpec {
         n
       }).to(Sink(c)).run()
       val sub = c.expectSubscription()
-      // nothing before requested
+      // running 8 in parallel
+      probe.receiveN(8).toSet should be((1 to 8).toSet)
       probe.expectNoMsg(500.millis)
       sub.request(1)
-      probe.expectMsg(1)
+      probe.expectMsg(9)
       probe.expectNoMsg(500.millis)
       sub.request(2)
-      probe.receiveN(2).toSet should be(Set(2, 3))
+      probe.receiveN(2).toSet should be(Set(10, 11))
       probe.expectNoMsg(500.millis)
       sub.request(10)
-      probe.receiveN(10).toSet should be((4 to 13).toSet)
+      probe.receiveN(9).toSet should be((12 to 20).toSet)
       probe.expectNoMsg(200.millis)
 
       for (n ← 1 to 13) c.expectNext(n)

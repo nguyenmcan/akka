@@ -269,6 +269,7 @@ private[akka] class OneBoundedInterpreter(ops: Seq[Stage[_, _]],
           throw new IllegalStateException("Cannot push during onAsyncInput unless isHoldingDownstream")
       }
       currentOp.precedingWasPull = false
+      currentOp.holdingDownstream = false
       elementInFlight = elem
       state = Pushing
       null
@@ -282,6 +283,7 @@ private[akka] class OneBoundedInterpreter(ops: Seq[Stage[_, _]],
           throw new IllegalStateException("Cannot push during onAsyncInput unless isHoldingUpstream")
       }
       currentOp.precedingWasPull = true
+      currentOp.holdingUpstream = false
       state = Pulling
       null
     }
@@ -317,6 +319,7 @@ private[akka] class OneBoundedInterpreter(ops: Seq[Stage[_, _]],
         if (comingFromSide && !currentOp.holdingDownstream)
           throw new IllegalStateException("Cannot push from onAsyncInput unless isHoldingDownStream")
       }
+      currentOp.holdingDownstream = false
       currentOp.precedingWasPull = false
       pipeline(activeOpIndex) = Finished.asInstanceOf[UntypedOp]
       // This MUST be an unsafeFork because the execution of PushFinish MUST strictly come before the finish execution
@@ -342,11 +345,41 @@ private[akka] class OneBoundedInterpreter(ops: Seq[Stage[_, _]],
       exit()
     }
 
+    override def holdUpstreamAndPush(elem: Any): UpstreamDirective = {
+      ReactiveStreamsCompliance.requireNonNullElement(elem)
+      if (comingFromUpstream && !currentOp.holdingDownstream)
+        throw new IllegalStateException("Cannot holdUpstreamAndPush unless isHoldingDownstream")
+      if (comingFromDownstream)
+        throw new IllegalStateException("Cannot holdUpstreamAndPush during onPull")
+      if (comingFromSide)
+        throw new IllegalStateException("Cannot holdUpstreamAndPush during onAsyncInput")
+      currentOp.precedingWasPull = false
+      currentOp.holdingUpstream = true
+      currentOp.holdingDownstream = false
+      elementInFlight = elem
+      state = Pushing
+      null
+    }
+
     override def isHoldingUpstream: Boolean = currentOp.holdingUpstream
 
     override def holdDownstream(): DownstreamDirective = {
       currentOp.holdingDownstream = true
       exit()
+    }
+
+    override def holdDownstreamAndPull(): DownstreamDirective = {
+      if (comingFromUpstream)
+        throw new IllegalStateException("Cannot holdDownstreamAndPull during onPush")
+      if (comingFromDownstream && !currentOp.holdingUpstream)
+        throw new IllegalStateException("Cannot holdDownstreamAndPull unless isHoldingUpstream")
+      if (comingFromSide)
+        throw new IllegalStateException("Cannot holdDownstreamAndPull during onAsyncInput")
+      currentOp.precedingWasPull = true
+      currentOp.holdingUpstream = false
+      currentOp.holdingDownstream = true
+      state = Pulling
+      null
     }
 
     override def isHoldingDownstream: Boolean = currentOp.holdingDownstream
@@ -532,7 +565,8 @@ private[akka] class OneBoundedInterpreter(ops: Seq[Stage[_, _]],
       case Failing(e) ⇒ padding + s"---X ${e.getMessage} => ${decide(e)}"
       case other      ⇒ padding + s"---? $state"
     }
-    println(f"$icon%-12s $name")
+    val holding = icon + (if (currentOp.holdingUpstream) 'U' else ' ') + (if (currentOp.holdingDownstream) 'D' else ' ')
+    println(f"$holding%-24s $name")
   }
 
   @tailrec private def execute(): Unit = {
@@ -608,7 +642,7 @@ private[akka] class OneBoundedInterpreter(ops: Seq[Stage[_, _]],
 
   def isFinished: Boolean = pipeline(Upstream) == Finished && pipeline(Downstream) == Finished
 
-  private class EntryState(position: Int) extends State {
+  private class EntryState(name: String, position: Int) extends State {
     val entryPoint = position
 
     override def run(): Unit = ()
@@ -617,8 +651,10 @@ private[akka] class OneBoundedInterpreter(ops: Seq[Stage[_, _]],
     override def enter(evt: Any): Unit = {
       activeOpIndex = entryPoint
       (currentOp: Any) match {
-        case a: AsyncStage[Any, Any, Any] ⇒ a.onAsyncInput(evt, this)
-        case other                        ⇒ throw new IllegalStateException("cannot enter() a non-AsyncStage")
+        case a: AsyncStage[Any, Any, Any] ⇒
+          if (Debug) println("    " * entryPoint + "-ai- " + evt)
+          a.onAsyncInput(evt, this)
+        case other ⇒ throw new IllegalStateException("cannot enter() a non-AsyncStage")
       }
     }
 
@@ -677,7 +713,7 @@ private[akka] class OneBoundedInterpreter(ops: Seq[Stage[_, _]],
       null
     }
 
-    override def toString = s"boundary($entryPoint)"
+    override def toString = s"$name($entryPoint)"
   }
 
   /**
@@ -688,9 +724,10 @@ private[akka] class OneBoundedInterpreter(ops: Seq[Stage[_, _]],
     while (op < pipeline.length) {
       (pipeline(op): Any) match {
         case b: BoundaryStage ⇒
-          b.context = new EntryState(op)
+          b.context = new EntryState("boundary", op)
         case a: AsyncStage[Any, Any, Any] ⇒
-          a.context = new EntryState(op)
+          a.context = new EntryState("async", op)
+          activeOpIndex = op
           a.initAsyncInput(a.context)
         case _ ⇒
       }

@@ -253,7 +253,7 @@ private[akka] object ActorProcessorFactory {
       case Conflate(s, f, _)          ⇒ (ActorInterpreter.props(settings, List(fusing.Conflate(s, f, settings.supervisionDecider)), materializer), ())
       case Buffer(n, s, _)            ⇒ (ActorInterpreter.props(settings, List(fusing.Buffer(n, s)), materializer), ())
       case MapConcat(f, _)            ⇒ (ActorInterpreter.props(settings, List(fusing.MapConcat(f, settings.supervisionDecider)), materializer), ())
-      case MapAsync(f, _)             ⇒ (MapAsyncProcessorImpl.props(settings, f), ())
+      case MapAsync(f, _)             ⇒ (ActorInterpreter.props(settings, List(fusing.MapAsync(8, f, settings.supervisionDecider)), materializer), ())
       case MapAsyncUnordered(f, _)    ⇒ (MapAsyncUnorderedProcessorImpl.props(settings, f), ())
       case Grouped(n, _)              ⇒ (ActorInterpreter.props(settings, List(fusing.Grouped(n)), materializer), ())
       case GroupBy(f, _)              ⇒ (GroupByProcessorImpl.props(settings, f), ())

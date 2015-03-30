@@ -515,7 +515,10 @@ sealed trait Context[Out] {
  */
 trait DetachedContext[Out] extends Context[Out] {
   def holdUpstream(): UpstreamDirective
+  def holdUpstreamAndPush(elem: Out): UpstreamDirective
+
   def holdDownstream(): DownstreamDirective
+  def holdDownstreamAndPull(): DownstreamDirective
 
   /**
    * This returns `true` when [[#hold]] has been used

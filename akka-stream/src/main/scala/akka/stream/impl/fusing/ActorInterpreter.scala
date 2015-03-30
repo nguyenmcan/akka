@@ -61,7 +61,7 @@ private[akka] class BatchingActorInputBoundary(val size: Int, val name: String)
   }
 
   private def enqueue(elem: Any): Unit = {
-    if (OneBoundedInterpreter.Debug) println(s" enqueueing $elem    for $name")
+    if (OneBoundedInterpreter.Debug) println(f" enq $elem%-19s $name")
     if (!upstreamCompleted) {
       if (inputBufferElements == size) throw new IllegalStateException("Input buffer overrun")
       inputBuffer((nextInputElementCursor + inputBufferElements) & IndexMask) = elem.asInstanceOf[AnyRef]
@@ -272,7 +272,10 @@ private[akka] class ActorOutputBoundary(val actor: ActorRef,
         downstreamDemand += elements
         if (downstreamDemand < 0)
           downstreamDemand = Long.MaxValue // Long overflow, Reactive Streams Spec 3:17: effectively unbounded
-        if (OneBoundedInterpreter.Debug) println(s" demand $downstreamDemand (+$elements)  for ${actor.path}")
+        if (OneBoundedInterpreter.Debug) {
+          val s = s"$downstreamDemand (+$elements)"
+          println(f" dem $s%-19s ${actor.path}")
+        }
         tryPutBallIn()
       }
 

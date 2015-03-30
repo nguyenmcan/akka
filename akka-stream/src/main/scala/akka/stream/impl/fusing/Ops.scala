@@ -10,6 +10,9 @@ import akka.stream._
 import akka.stream.Supervision
 import scala.concurrent.{ ExecutionContext, Future }
 import scala.util.{ Try, Success, Failure }
+import scala.annotation.tailrec
+import scala.util.control.NonFatal
+import akka.stream.impl.ReactiveStreamsCompliance
 
 /**
  * INTERNAL API
@@ -340,45 +343,81 @@ private[akka] final case class Expand[In, Out, Seed](seed: In ⇒ Seed, extrapol
 /**
  * INTERNAL API
  */
-private[akka] final case class MapAsync[In, Out](f: In ⇒ Future[Out]) extends AsyncStage[In, Out, (Int, Try[Out])] {
-  private var doneSeqNo = 0
-  private val seqNo = Iterator from 0
+private[akka] final case class MapAsync[In, Out](parallelism: Int, f: In ⇒ Future[Out], decider: Supervision.Decider)
+  extends AsyncStage[In, Out, (Int, Try[Out])] {
 
-  private var decider: Supervision.Decider = _
+  type Notification = (Int, Try[Out])
 
-  override def initAsyncInput(ctx: AsyncContext[Out, (Int, Try[Out])]): Unit = {
+  private var callback: AsyncCallback[Notification] = _
+  private val elemsInFlight = FixedSizeBuffer[Try[Out]](parallelism)
+
+  override def initAsyncInput(ctx: AsyncContext[Out, Notification]): Unit = {
+    callback = ctx.getAsyncCallback()
   }
 
-  private var elemInFlight: Out = _
-
-  override def onPush(elem: In, ctx: AsyncContext[Out, (Int, Try[Out])]) = {
-    val future = f(elem)
-    val cb = ctx.getAsyncCallback()
-    future.onComplete(t => cb.invoke((0, t)))(akka.dispatch.ExecutionContexts.sameThreadExecutionContext)
-    ctx.holdUpstream()
-  }
-
-  override def onPull(ctx: AsyncContext[Out, (Int, Try[Out])]) =
-    if (elemInFlight != null) {
-      val e = elemInFlight
-      elemInFlight = null.asInstanceOf[Out]
-      pushIt(e, ctx)
-    } else ctx.holdDownstream()
-
-  override def onAsyncInput(input: (Int, Try[Out]), ctx: AsyncContext[Out, (Int, Try[Out])]) =
-    input._2 match {
-      case Failure(ex)                           ⇒ ctx.fail(ex)
-      case Success(e) if ctx.isHoldingDownstream ⇒ pushIt(e, ctx)
-      case Success(e) ⇒
-        elemInFlight = e
-        ctx.ignore()
+  override def onPush(elem: In, ctx: AsyncContext[Out, Notification]) = {
+    val future =
+      try f(elem)
+      catch {
+        case NonFatal(ex) if decider(ex) != Supervision.Stop ⇒ null // resume processing
+      }
+    if (future ne null) {
+      val idx = elemsInFlight.enqueue(null)
+      future.onComplete(t ⇒ callback.invoke((idx, t)))(akka.dispatch.ExecutionContexts.sameThreadExecutionContext)
     }
+    if (elemsInFlight.isFull) ctx.holdUpstream()
+    else ctx.pull()
+  }
 
-  override def onUpstreamFinish(ctx: AsyncContext[Out, (Int, Try[Out])]) =
-    if (ctx.isHoldingUpstream) ctx.absorbTermination()
+  override def onPull(ctx: AsyncContext[Out, (Int, Try[Out])]) = {
+    @tailrec def rec(hasConsumed: Boolean): DownstreamDirective =
+      if (elemsInFlight.isEmpty && ctx.isFinishing) ctx.finish()
+      else if (elemsInFlight.isEmpty || elemsInFlight.peek == null) {
+        if (hasConsumed && ctx.isHoldingUpstream) ctx.holdDownstreamAndPull()
+        else ctx.holdDownstream()
+      } else elemsInFlight.dequeue() match {
+        case Failure(ex) ⇒ rec(true)
+        case Success(elem) ⇒
+          if (ctx.isHoldingUpstream) ctx.pushAndPull(elem)
+          else ctx.push(elem)
+      }
+    rec(false)
+  }
+
+  override def onAsyncInput(input: (Int, Try[Out]), ctx: AsyncContext[Out, Notification]) = {
+    @tailrec def rec(hasConsumed: Boolean): Directive =
+      if (elemsInFlight.isEmpty && ctx.isFinishing) ctx.finish()
+      else if (elemsInFlight.isEmpty || elemsInFlight.peek == null) ctx.ignore()
+      else elemsInFlight.dequeue() match {
+        case Failure(ex) ⇒ rec(true)
+        case Success(elem) ⇒
+          if (ctx.isHoldingUpstream) ctx.pushAndPull(elem)
+          else ctx.push(elem)
+      }
+
+    input._2 match {
+      case f @ Failure(ex) ⇒
+        if (decider(ex) != Supervision.Stop) {
+          elemsInFlight.put(input._1, f)
+          if (ctx.isHoldingDownstream) rec(false)
+          else ctx.ignore()
+        } else ctx.fail(ex)
+      case s: Success[_] ⇒
+        try {
+          ReactiveStreamsCompliance.requireNonNullElement(s.value)
+          elemsInFlight.put(input._1, s)
+        } catch {
+          case NonFatal(ex) ⇒
+            if (decider(ex) != Supervision.Stop)
+              elemsInFlight.put(input._1, Failure(ex))
+            else ctx.fail(ex)
+        }
+        if (ctx.isHoldingDownstream) rec(false)
+        else ctx.ignore()
+    }
+  }
+
+  override def onUpstreamFinish(ctx: AsyncContext[Out, Notification]) =
+    if (ctx.isHoldingUpstream || !elemsInFlight.isEmpty) ctx.absorbTermination()
     else ctx.finish()
-
-  private def pushIt(elem: Out, ctx: AsyncContext[Out, (Int, Try[Out])]) =
-    if (ctx.isFinishing) ctx.pushAndFinish(elem)
-    else ctx.pushAndPull(elem)
 }
