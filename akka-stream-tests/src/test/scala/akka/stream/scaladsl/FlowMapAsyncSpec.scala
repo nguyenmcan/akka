@@ -70,7 +70,7 @@ class FlowMapAsyncSpec extends AkkaSpec {
     "produce future elements" in {
       val c = StreamTestKit.SubscriberProbe[Int]()
       implicit val ec = system.dispatcher
-      val p = Source(1 to 3).mapAsync(n ⇒ Future(n)).runWith(Sink(c))
+      val p = Source(1 to 3).mapAsync(4, n ⇒ Future(n)).runWith(Sink(c))
       val sub = c.expectSubscription()
       sub.request(2)
       c.expectNext(1)
@@ -84,7 +84,7 @@ class FlowMapAsyncSpec extends AkkaSpec {
     "produce future elements in order" in {
       val c = StreamTestKit.SubscriberProbe[Int]()
       implicit val ec = system.dispatcher
-      val p = Source(1 to 50).mapAsync(n ⇒ Future {
+      val p = Source(1 to 50).mapAsync(4, n ⇒ Future {
         Thread.sleep(ThreadLocalRandom.current().nextInt(1, 10))
         n
       }).to(Sink(c)).run()
@@ -98,7 +98,7 @@ class FlowMapAsyncSpec extends AkkaSpec {
       val probe = TestProbe()
       val c = StreamTestKit.SubscriberProbe[Int]()
       implicit val ec = system.dispatcher
-      val p = Source(1 to 20).mapAsync(n ⇒ Future {
+      val p = Source(1 to 20).mapAsync(8, n ⇒ Future {
         probe.ref ! n
         n
       }).to(Sink(c)).run()
@@ -124,7 +124,7 @@ class FlowMapAsyncSpec extends AkkaSpec {
       val latch = TestLatch(1)
       val c = StreamTestKit.SubscriberProbe[Int]()
       implicit val ec = system.dispatcher
-      val p = Source(1 to 5).mapAsync(n ⇒ Future {
+      val p = Source(1 to 5).mapAsync(4, n ⇒ Future {
         if (n == 3) throw new RuntimeException("err1") with NoStackTrace
         else {
           Await.ready(latch, 10.seconds)
@@ -141,7 +141,7 @@ class FlowMapAsyncSpec extends AkkaSpec {
       val latch = TestLatch(1)
       val c = StreamTestKit.SubscriberProbe[Int]()
       implicit val ec = system.dispatcher
-      val p = Source(1 to 5).mapAsync(n ⇒
+      val p = Source(1 to 5).mapAsync(4, n ⇒
         if (n == 3) throw new RuntimeException("err2") with NoStackTrace
         else {
           Future {
@@ -159,7 +159,7 @@ class FlowMapAsyncSpec extends AkkaSpec {
     "resume after future failure" in {
       val c = StreamTestKit.SubscriberProbe[Int]()
       implicit val ec = system.dispatcher
-      val p = Source(1 to 5).section(supervisionStrategy(resumingDecider))(_.mapAsync(n ⇒ Future {
+      val p = Source(1 to 5).section(supervisionStrategy(resumingDecider))(_.mapAsync(4, n ⇒ Future {
         if (n == 3) throw new RuntimeException("err3") with NoStackTrace
         else n
       })).to(Sink(c)).run()
@@ -172,7 +172,7 @@ class FlowMapAsyncSpec extends AkkaSpec {
     "resume when mapAsync throws" in {
       val c = StreamTestKit.SubscriberProbe[Int]()
       implicit val ec = system.dispatcher
-      val p = Source(1 to 5).section(supervisionStrategy(resumingDecider))(_.mapAsync(n ⇒
+      val p = Source(1 to 5).section(supervisionStrategy(resumingDecider))(_.mapAsync(4, n ⇒
         if (n == 3) throw new RuntimeException("err4") with NoStackTrace
         else Future(n))).
         to(Sink(c)).run()
@@ -184,7 +184,7 @@ class FlowMapAsyncSpec extends AkkaSpec {
 
     "signal NPE when future is completed with null" in {
       val c = StreamTestKit.SubscriberProbe[String]()
-      val p = Source(List("a", "b")).mapAsync(elem ⇒ Future.successful(null)).to(Sink(c)).run()
+      val p = Source(List("a", "b")).mapAsync(4, elem ⇒ Future.successful(null)).to(Sink(c)).run()
       val sub = c.expectSubscription()
       sub.request(10)
       c.expectError.getMessage should be(ReactiveStreamsCompliance.ElementMustNotBeNullMsg)
@@ -193,7 +193,7 @@ class FlowMapAsyncSpec extends AkkaSpec {
     "resume when future is completed with null" in {
       val c = StreamTestKit.SubscriberProbe[String]()
       val p = Source(List("a", "b", "c")).section(supervisionStrategy(resumingDecider))(
-        _.mapAsync(elem ⇒ if (elem == "b") Future.successful(null) else Future.successful(elem)))
+        _.mapAsync(4, elem ⇒ if (elem == "b") Future.successful(null) else Future.successful(elem)))
         .to(Sink(c)).run()
       val sub = c.expectSubscription()
       sub.request(10)
@@ -205,7 +205,7 @@ class FlowMapAsyncSpec extends AkkaSpec {
       val pub = StreamTestKit.PublisherProbe[Int]()
       val sub = StreamTestKit.SubscriberProbe[Int]()
 
-      Source(pub).mapAsync(Future.successful).runWith(Sink(sub))
+      Source(pub).mapAsync(4, Future.successful).runWith(Sink(sub))
 
       val upstream = pub.expectSubscription()
       upstream.expectRequest()

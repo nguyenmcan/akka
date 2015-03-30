@@ -446,7 +446,7 @@ public class FlowTest extends StreamTest {
   public void mustBeAbleToUseMapAsync() throws Exception {
     final JavaTestKit probe = new JavaTestKit(system);
     final Iterable<String> input = Arrays.asList("a", "b", "c");
-    final Flow<String, String, BoxedUnit> flow = Flow.of(String.class).mapAsync(new Function<String, Future<String>>() {
+    final Flow<String, String, BoxedUnit> flow = Flow.of(String.class).mapAsync(4, new Function<String, Future<String>>() {
       public Future<String> apply(String elem) {
         return Futures.successful(elem.toUpperCase());
       }

@@ -18,7 +18,7 @@ class MapAsyncTest extends AkkaIdentityProcessorVerification[Int] {
     implicit val materializer = ActorFlowMaterializer(settings)(system)
 
     processorFromFlow(
-      Flow[Int].mapAsync(Future.successful).withAttributes(OperationAttributes.name("identity")))
+      Flow[Int].mapAsync(3, Future.successful).withAttributes(OperationAttributes.name("identity")))
   }
 
   override def createElement(element: Int): Int = element
