@@ -3,12 +3,11 @@
  */
 package akka.stream.javadsl;
 
-import java.util.ArrayList;
-import java.util.List;
+import java.util.Arrays;
 
-import akka.stream.StreamTest;
-import akka.stream.javadsl.japi.Function2;
-import akka.stream.testkit.AkkaSpec;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import org.junit.ClassRule;
 import org.junit.Test;
 import org.reactivestreams.Publisher;
@@ -16,8 +15,10 @@ import scala.concurrent.Await;
 import scala.concurrent.Future;
 import scala.concurrent.duration.Duration;
 
-import java.util.ArrayList;
-import java.util.List;
+import akka.stream.StreamTest;
+import akka.stream.javadsl.japi.Function2;
+import akka.stream.testkit.AkkaSpec;
+import akka.testkit.TestProbe;
 
 public class SinkTest extends StreamTest {
   public SinkTest() {
@@ -31,14 +32,14 @@ public class SinkTest extends StreamTest {
   @Test
   public void mustBeAbleToUseFanoutPublisher() throws Exception {
     final Sink<Object, Publisher<Object>> pubSink = Sink.fanoutPublisher(2, 2);
+    @SuppressWarnings("unused")
     final Publisher<Object> publisher = Source.from(new ArrayList<Object>()).runWith(pubSink, materializer);
   }
   
   @Test
   public void mustBeAbleToUseFuture() throws Exception {
     final Sink<Integer, Future<Integer>> futSink = Sink.head();
-    final List<Integer> list = new ArrayList<Integer>();
-    list.add(1);
+    final List<Integer> list = Collections.singletonList(1);
     final Future<Integer> future = Source.from(list).runWith(futSink, materializer);
     assert Await.result(future, Duration.create("1 second")).equals(1);
   }
@@ -50,7 +51,19 @@ public class SinkTest extends StreamTest {
         return arg1 + arg2;
       }
     });
+    @SuppressWarnings("unused")
     Future<Integer> integerFuture = Source.from(new ArrayList<Integer>()).runWith(foldSink, materializer);
+  }
+  
+  @Test
+  public void mustBeAbleToUseTell() throws Exception {
+    TestProbe probe = new TestProbe(system);
+    final Sink<Integer, ?> tellSink = Sink.actorRef(probe.ref(), "done");
+    Source.from(Arrays.asList(1, 2, 3)).runWith(tellSink, materializer);
+    probe.expectMsg(1);
+    probe.expectMsg(2);
+    probe.expectMsg(3);
+    probe.expectMsg("done");
   }
 
 }

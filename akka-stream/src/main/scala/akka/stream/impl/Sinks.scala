@@ -200,3 +200,24 @@ private[akka] final class PropsSink[In](props: Props, val attributes: OperationA
   override protected def newInstance(shape: SinkShape[In]): SinkModule[In, ActorRef] = new PropsSink[In](props, attributes, shape)
   override def withAttributes(attr: OperationAttributes): Module = new PropsSink[In](props, attr, amendShape(attr))
 }
+
+/**
+ * INTERNAL API
+ */
+private[akka] final class ActorRefSink[In](ref: ActorRef, onCompleteMessage: Any,
+                                           val attributes: OperationAttributes,
+                                           shape: SinkShape[In]) extends SinkModule[In, Unit](shape) {
+
+  override def create(materializer: ActorFlowMaterializerImpl, flowName: String) = {
+    val subscriberRef = materializer.actorOf(
+      ActorRefSinkActor.props(ref, materializer.settings.maxInputBufferSize, onCompleteMessage),
+      name = s"$flowName-tell")
+    (akka.stream.actor.ActorSubscriber[In](subscriberRef), ())
+  }
+
+  override protected def newInstance(shape: SinkShape[In]): SinkModule[In, Unit] =
+    new ActorRefSink[In](ref, onCompleteMessage, attributes, shape)
+  override def withAttributes(attr: OperationAttributes): Module =
+    new ActorRefSink[In](ref, onCompleteMessage, attr, amendShape(attr))
+}
+
