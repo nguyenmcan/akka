@@ -16,7 +16,7 @@ class ActorRefSourceSpec extends AkkaSpec {
 
     "emit received messages to the stream" in {
       val s = StreamTestKit.SubscriberProbe[Int]()
-      val ref = Source.actorRef.to(Sink(s)).run()
+      val ref = Source.actorRef(10, OverflowStrategy.fail).to(Sink(s)).run()
       val sub = s.expectSubscription
       sub.request(2)
       ref ! 1
@@ -27,25 +27,24 @@ class ActorRefSourceSpec extends AkkaSpec {
       s.expectNoMsg(500.millis)
     }
 
-    "be useful together with buffer" in {
+    "buffer when needed" in {
       val s = StreamTestKit.SubscriberProbe[Int]()
-      // FIXME isn't there a race when starting up, if I send to the ref before the buffer has requested?
-      //       Do we ignore that and fix that with fusing, or shall I add an internal buffer to the ActorRefSourceActor?
-      val ref = Source.actorRef
-        .buffer(100, OverflowStrategy.DropTail).withAttributes(OperationAttributes.inputBuffer(initial = 128, max = 128))
-        .to(Sink(s)).run()
+      val ref = Source.actorRef(100, OverflowStrategy.dropHead).to(Sink(s)).run()
       val sub = s.expectSubscription
-      for (n ← 1 to 110) ref ! n
-      sub.request(20)
-      for (n ← 1 to 20) s.expectNext(n)
-      s.expectNoMsg(300.millis)
+      for (n ← 1 to 20) ref ! n
+      sub.request(10)
+      for (n ← 1 to 10) s.expectNext(n)
+      sub.request(10)
+      for (n ← 11 to 20) s.expectNext(n)
+
+      for (n ← 200 to 399) ref ! n
       sub.request(100)
-      for (n ← 21 to 100) s.expectNext(n)
+      for (n ← 300 to 399) s.expectNext(n)
     }
 
     "terminate when the stream is cancelled" in {
       val s = StreamTestKit.SubscriberProbe[Int]()
-      val ref = Source.actorRef.to(Sink(s)).run()
+      val ref = Source.actorRef(0, OverflowStrategy.fail).to(Sink(s)).run()
       watch(ref)
       val sub = s.expectSubscription
       sub.cancel()

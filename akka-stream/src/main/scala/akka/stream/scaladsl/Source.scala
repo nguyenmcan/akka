@@ -7,7 +7,6 @@ import akka.stream.impl.Stages.{ MaterializingStageFactory, StageModule }
 import akka.stream.{ SourceShape, Inlet, Outlet }
 import akka.stream.impl.StreamLayout.{ EmptyModule, Module }
 import akka.stream.stage.{ TerminationDirective, Directive, Context, PushPullStage }
-
 import scala.annotation.unchecked.uncheckedVariance
 import scala.language.higherKinds
 import akka.actor.Props
@@ -22,6 +21,7 @@ import akka.actor.Cancellable
 import akka.actor.ActorRef
 import scala.concurrent.Promise
 import org.reactivestreams.Subscriber
+import akka.stream.OverflowStrategy
 
 /**
  * A `Source` is a set of stream processing steps that has one open output. It can comprise
@@ -325,10 +325,22 @@ object Source extends SourceApply {
   /**
    * Creates a `Source` that is materialized as an [[akka.actor.ActorRef]].
    * Messages sent to this actor will be emitted to the stream if there is demand from downstream,
-   * otherwise it will be dropped. It is recommended to add a [[#buffer]] stage after this
-   * sink to reduce dropped messages until the explicit buffer is full.
+   * otherwise they will be buffered until request for demand is received.
+   *
+   * Depending on the defined [[akka.stream.OverflowStrategy]] it might drop elements if
+   * there is no space available in the buffer.
+   *
+   * The buffer can be disabled by using `bufferSize` of 0 and then received messages are dropped
+   * if there is no demand from downstream. When `bufferSize` is 0 the `overflowStrategy` is does
+   * not matter.
+   *
+   * @param bufferSize The size of the buffer in element count
+   * @param overflowStrategy Strategy that is used when incoming elements cannot fit inside the buffer
    */
-  def actorRef[T]: Source[T, ActorRef] =
-    new Source(new ActorRefSource(none, shape("ActorRefSource")))
+  def actorRef[T](bufferSize: Int, overflowStrategy: OverflowStrategy): Source[T, ActorRef] = {
+    require(bufferSize >= 0, "bufferSize must be greater than or equal to 0")
+    require(overflowStrategy != OverflowStrategy.Backpressure, "Backpressure overflowStrategy not supported")
+    new Source(new ActorRefSource(bufferSize, overflowStrategy, none, shape("ActorRefSource")))
+  }
 
 }

@@ -54,6 +54,8 @@ object OverflowStrategy {
    */
   def dropBuffer: OverflowStrategy = DropBuffer
 
+  // FIXME shouldn't there be a strategy that drops the new element?
+
   /**
    * If the buffer is full when a new element is available this strategy backpressures the upstream publisher until
    * space becomes available in the buffer.

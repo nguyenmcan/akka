@@ -162,11 +162,20 @@ object Source {
   /**
    * Creates a `Source` that is materialized as an [[akka.actor.ActorRef]].
    * Messages sent to this actor will be emitted to the stream if there is demand from downstream,
-   * otherwise it will be dropped. It is recommended to add a [[#buffer]] stage after this
-   * sink to reduce dropped messages until the explicit buffer is full.
+   * otherwise they will be buffered until request for demand is received.
+   *
+   * Depending on the defined [[akka.stream.OverflowStrategy]] it might drop elements if
+   * there is no space available in the buffer.
+   *
+   * The buffer can be disabled by using `bufferSize` of 0 and then received messages are dropped
+   * if there is no demand from downstream. When `bufferSize` is 0 the `overflowStrategy` is does
+   * not matter.
+   *
+   * @param bufferSize The size of the buffer in element count
+   * @param overflowStrategy Strategy that is used when incoming elements cannot fit inside the buffer
    */
-  def actorRef[T](): Source[T, ActorRef] =
-    new Source(scaladsl.Source.actorRef)
+  def actorRef[T](bufferSize: Int, overflowStrategy: OverflowStrategy): Source[T, ActorRef] =
+    new Source(scaladsl.Source.actorRef(bufferSize, overflowStrategy))
 
   /**
    * Concatenates two sources so that the first element

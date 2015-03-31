@@ -461,14 +461,12 @@ public class SourceTest extends StreamTest {
   @Test
   public void mustBeAbleToUseActorRefSource() throws Exception {
     final JavaTestKit probe = new JavaTestKit(system);
-    final Source<Integer, ActorRef> actorRefSource = Source.actorRef();
+    final Source<Integer, ActorRef> actorRefSource = Source.actorRef(10, OverflowStrategy.fail());
     final ActorRef ref = actorRefSource.to(Sink.foreach(new Procedure<Integer>() {
       public void apply(Integer elem) {
         probe.getRef().tell(elem, ActorRef.noSender());
       }
     })).run(materializer);
-    // FIXME race (dropping) when sending first message too early
-    Thread.sleep(1000);
     ref.tell(1, ActorRef.noSender());
     probe.expectMsgEquals(1);
     ref.tell(2, ActorRef.noSender());
