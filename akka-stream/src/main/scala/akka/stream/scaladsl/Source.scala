@@ -258,14 +258,6 @@ object Source extends SourceApply {
     new Source(new TickSource(initialDelay, interval, tick, none, shape("TickSource")))
 
   /**
-   * Creates a `Source` that is materialized to an [[akka.actor.ActorRef]] which points to an Actor
-   * created according to the passed in [[akka.actor.Props]]. Actor created by the `props` should
-   * be [[akka.stream.actor.ActorPublisher]].
-   */
-  def apply[T](props: Props): Source[T, ActorRef] =
-    new Source(new PropsSource(props, none, shape("PropsSource")))
-
-  /**
    * Create a `Source` with one element.
    * Every connected `Sink` of this stream will see an individual stream consisting of one element.
    */
@@ -321,5 +313,22 @@ object Source extends SourceApply {
    */
   def subscriber[T]: Source[T, Subscriber[T]] =
     new Source(new SubscriberSource[T](none, shape("SubscriberSource")))
+
+  /**
+   * Creates a `Source` that is materialized to an [[akka.actor.ActorRef]] which points to an Actor
+   * created according to the passed in [[akka.actor.Props]]. Actor created by the `props` should
+   * be [[akka.stream.actor.ActorPublisher]].
+   */
+  def actorPublisher[T](props: Props): Source[T, ActorRef] =
+    new Source(new ActorPublisherSource(props, none, shape("ActorPublisherSource")))
+
+  /**
+   * Creates a `Source` that is materialized as an [[akka.actor.ActorRef]].
+   * Messages sent to this actor will be emitted to the stream if there is demand from downstream,
+   * otherwise it will be dropped. It is recommended to add a [[#buffer]] stage after this
+   * sink to reduce dropped messages until the explicit buffer is full.
+   */
+  def actorRef[T]: Source[T, ActorRef] =
+    new Source(new ActorRefSource(none, shape("ActorRefSource")))
 
 }
