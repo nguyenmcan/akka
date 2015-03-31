@@ -218,6 +218,6 @@ object Sink extends SinkApply {
    * be [[akka.stream.actor.ActorSubscriber]].
    */
   def actorSubscriber[T](props: Props): Sink[T, ActorRef] =
-    new Sink(new PropsSink(props, none, shape("PropsSink")))
+    new Sink(new ActorSubscriberSink(props, none, shape("ActorSubscriberSink")))
 
 }

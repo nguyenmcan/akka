@@ -18,7 +18,7 @@ import scala.concurrent.duration.Duration;
 import akka.stream.StreamTest;
 import akka.stream.javadsl.japi.Function2;
 import akka.stream.testkit.AkkaSpec;
-import akka.testkit.TestProbe;
+import akka.testkit.JavaTestKit;
 
 public class SinkTest extends StreamTest {
   public SinkTest() {
@@ -56,14 +56,14 @@ public class SinkTest extends StreamTest {
   }
   
   @Test
-  public void mustBeAbleToUseTell() throws Exception {
-    TestProbe probe = new TestProbe(system);
-    final Sink<Integer, ?> tellSink = Sink.actorRef(probe.ref(), "done");
-    Source.from(Arrays.asList(1, 2, 3)).runWith(tellSink, materializer);
-    probe.expectMsg(1);
-    probe.expectMsg(2);
-    probe.expectMsg(3);
-    probe.expectMsg("done");
+  public void mustBeAbleToUseActorRefSink() throws Exception {
+    final JavaTestKit probe = new JavaTestKit(system);
+    final Sink<Integer, ?> actorRefSink = Sink.actorRef(probe.getRef(), "done");
+    Source.from(Arrays.asList(1, 2, 3)).runWith(actorRefSink, materializer);
+    probe.expectMsgEquals(1);
+    probe.expectMsgEquals(2);
+    probe.expectMsgEquals(3);
+    probe.expectMsgEquals("done");
   }
 
 }

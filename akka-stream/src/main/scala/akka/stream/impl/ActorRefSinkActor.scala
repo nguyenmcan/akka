@@ -1,3 +1,6 @@
+/**
+ * Copyright (C) 2015 Typesafe Inc. <http://www.typesafe.com>
+ */
 package akka.stream.impl
 
 import akka.stream.actor.ActorSubscriber
@@ -27,10 +30,16 @@ private[akka] class ActorRefSinkActor(ref: ActorRef, highWatermark: Int, onCompl
   context.watch(ref)
 
   def receive = {
-    case OnNext(elem)      ⇒ ref ! elem
-    case OnError(cause)    ⇒ ref ! Status.Failure(cause)
-    case OnComplete        ⇒ ref ! onCompleteMessage
-    case Terminated(`ref`) ⇒ context.stop(self) // will cancel upstream
+    case OnNext(elem) ⇒
+      ref ! elem
+    case OnError(cause) ⇒
+      ref ! Status.Failure(cause)
+      context.stop(self)
+    case OnComplete ⇒
+      ref ! onCompleteMessage
+      context.stop(self)
+    case Terminated(`ref`) ⇒
+      context.stop(self) // will cancel upstream
   }
 
 }
